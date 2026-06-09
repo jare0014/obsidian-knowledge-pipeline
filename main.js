@@ -566,7 +566,7 @@ Content: ${body}`;
     async createLandingPage(nb) {
         try {
             const importsFolder = this.settings.importsFolder || '00_Imports';
-            let title = nb.title.replace(/[\\/:*?"<>|]/g, '-').trim();
+            let title = nb.title.replace(/[\/\\:*?"<>|]/g, '-').trim();
             if (!title) title = nb.id;
             
             const targetPrefix = importsFolder.replace(/\\/g, '/').replace(/\\/+$/, '') + '/';
