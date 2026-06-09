@@ -569,7 +569,7 @@ Content: ${body}`;
             let title = nb.title.replace(/[\/\\:*?"<>|]/g, '-').trim();
             if (!title) title = nb.id;
             
-            const targetPrefix = importsFolder.replace(/\\/g, '/').replace(/\\/+$/, '') + '/';
+            const targetPrefix = importsFolder.replace(/\\/g, '/').replace(/\/+$/, '') + '/';
             let targetPath = `${targetPrefix}${title}.md`;
             
             let counter = 1;
