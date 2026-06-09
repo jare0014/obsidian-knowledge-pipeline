@@ -40,6 +40,12 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             callback: () => this.runArtifactGenerator('cinematic-video')
         });
 
+        this.addCommand({
+            id: 'import-notebooks',
+            name: 'NotebookLM: Sync New Notebooks',
+            callback: () => this.runNotebookSync()
+        });
+
         // Run legacy notes buttons migration
         this.app.workspace.onLayoutReady(() => {
             this.migrateExistingNotes();
@@ -492,7 +498,145 @@ Content: ${body}`;
             console.error("Failed to migrate existing notes:", e);
         }
     }
+
+    async runNotebookSync() {
+        try {
+            const secretId = 'knowledge-pipeline-notebooklm-session';
+            const sessionJson = await this.app.secretStorage.getSecret(secretId) || '';
+            
+            if (!sessionJson) {
+                new obsidian.Notice("Error: NotebookLM session credentials not found in keychain! Please check settings to login.");
+                return;
+            }
+
+            const loadingNotice = new obsidian.Notice("Scanning for new NotebookLM notebooks...", 0);
+            
+            const child_process = require('child_process');
+            const path = require('path');
+            const fs = require('fs');
+
+            const vaultPath = this.app.vault.adapter.getBasePath();
+            const scriptPath = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline', 'import_notebooks.py');
+
+            if (!fs.existsSync(scriptPath)) {
+                loadingNotice.hide();
+                new obsidian.Notice(`Error: Import script not found at ${scriptPath}`);
+                return;
+            }
+
+            const env = Object.assign({}, process.env, {
+                NOTEBOOKLM_AUTH_JSON: sessionJson
+            });
+
+            child_process.execFile('python', ['-u', scriptPath, vaultPath], { cwd: path.dirname(scriptPath), env: env, maxBuffer: 1024 * 1024 * 10 }, (err, stdout, stderr) => {
+                loadingNotice.hide();
+                if (err) {
+                    console.error("Sync scan failed:", stderr || stdout);
+                    new obsidian.Notice(`Sync Scan Failed: ${stderr || stdout}`);
+                    return;
+                }
+
+                try {
+                    const report = JSON.parse(stdout);
+                    if (report.error) {
+                        new obsidian.Notice(`Sync Scan Failed: ${report.error}`);
+                        return;
+                    }
+                    
+                    const newNbs = report.new_notebooks || [];
+                    const duplicateNbs = report.skipped_notebooks || [];
+                    
+                    if (newNbs.length === 0 && duplicateNbs.length === 0) {
+                        new obsidian.Notice("All your NotebookLM notebooks are already imported! Sync complete.");
+                    } else {
+                        new NotebookLMImportModal(this.app, this, newNbs, duplicateNbs).open();
+                    }
+                } catch (parseErr) {
+                    console.error("Failed to parse sync report:", stdout);
+                    new obsidian.Notice("Failed to parse sync scan report.");
+                }
+            });
+
+        } catch (err) {
+            console.error("Sync error:", err);
+            new obsidian.Notice(`Sync Failed: ${err.message}`);
+        }
+    }
+    
+    async createLandingPage(nb) {
+        try {
+            const importsFolder = this.settings.importsFolder || '00_Imports';
+            let title = nb.title.replace(/[\\/:*?"<>|]/g, '-').trim();
+            if (!title) title = nb.id;
+            
+            const targetPrefix = importsFolder.replace(/\\/g, '/').replace(/\\/+$/, '') + '/';
+            let targetPath = `${targetPrefix}${title}.md`;
+            
+            let counter = 1;
+            while (await this.app.vault.adapter.exists(targetPath)) {
+                targetPath = `${targetPrefix}${title} (${counter}).md`;
+                counter++;
+            }
+            
+            const targetUrl = `https://notebooklm.google.com/notebook/${nb.id}`;
+            const summary = "Imported from NotebookLM sync. Click buttons to generate artifacts.";
+            
+            const structuredContent = `---
+url: ${targetUrl}
+topic: NotebookLM Import
+summarization: "${summary}"
+notebook_id: "${nb.id}"
+---
+# ${title}
+
+**Original Source**: [NotebookLM Project](${targetUrl})
+
+## 📝 Summarization
+${summary}
+
+## 🛠️ NotebookLM Artifacts
+\`\`\`meta-bind-button
+label: 🧠 Generate Mind Map
+icon: "git-branch"
+style: primary
+hidden: false
+actions:
+  - type: command
+    command: knowledge-pipeline:generate-mind-map
+\`\`\`
+\`\`\`meta-bind-button
+label: 🎙️ Generate Podcast (Audio)
+icon: "headphones"
+style: primary
+hidden: false
+actions:
+  - type: command
+    command: knowledge-pipeline:generate-podcast
+\`\`\`
+\`\`\`meta-bind-button
+label: 🎬 Generate Cinematic Video
+icon: "video"
+style: primary
+hidden: false
+actions:
+  - type: command
+    command: knowledge-pipeline:generate-video
+\`\`\`
+
+### Generated Attachments
+- **Podcast Audio**: 
+- **Cinematic Video**: 
+`;
+            await this.app.vault.create(targetPath, structuredContent);
+            return true;
+        } catch (err) {
+            console.error("Failed to create landing page:", err);
+            new obsidian.Notice(`Error creating note for ${nb.title}: ${err.message}`);
+            return false;
+        }
+    }
 }
+
 
 class NotebookLMCleanupModal extends obsidian.Modal {
     constructor(app, plugin, deletedNotebooks, failedDeletions, missingArtifacts) {
@@ -691,6 +835,143 @@ class NotebookLMCleanupModal extends obsidian.Modal {
         const closeBtn = footer.createEl('button', { text: 'Done', cls: 'mod-cta' });
         closeBtn.style.padding = '6px 20px';
         closeBtn.onClickEvent(() => {
+            this.close();
+        });
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
+
+class NotebookLMImportModal extends obsidian.Modal {
+    constructor(app, plugin, newNotebooks, duplicateNotebooks) {
+        super(app);
+        this.plugin = plugin;
+        this.newNotebooks = newNotebooks || [];
+        this.duplicateNotebooks = duplicateNotebooks || [];
+        this.selectedToImport = new Set();
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.empty();
+        
+        contentEl.style.padding = '10px 20px 20px 20px';
+        contentEl.style.maxWidth = '600px';
+
+        contentEl.createEl('h2', { 
+            text: 'Import NotebookLM Notebooks', 
+            cls: 'import-modal-title' 
+        }).style.color = 'var(--text-normal)';
+
+        const mainContainer = contentEl.createDiv({ cls: 'import-modal-container' });
+
+        if (this.newNotebooks.length > 0) {
+            const newSection = mainContainer.createDiv();
+            newSection.style.marginBottom = '20px';
+            
+            const newTitle = newSection.createEl('h3');
+            newTitle.innerHTML = `✨ New Notebooks (${this.newNotebooks.length})`;
+            newTitle.style.color = 'var(--text-accent)';
+            newTitle.style.marginTop = '0';
+            
+            newSection.createEl('p', { 
+                text: 'The following notebooks are not in your vault. They will be imported:', 
+                cls: 'setting-item-description' 
+            }).style.marginBottom = '10px';
+
+            const listContainer = newSection.createDiv();
+            listContainer.style.backgroundColor = 'var(--background-secondary)';
+            listContainer.style.border = '1px solid var(--background-modifier-border)';
+            listContainer.style.borderRadius = '6px';
+            listContainer.style.padding = '10px 15px';
+            listContainer.style.maxHeight = '150px';
+            listContainer.style.overflowY = 'auto';
+
+            this.newNotebooks.forEach(nb => {
+                const item = listContainer.createDiv();
+                item.style.fontSize = '0.9em';
+                item.style.padding = '4px 0';
+                item.style.borderBottom = '1px solid var(--background-modifier-border-glow)';
+                item.innerHTML = `✅ <strong>${nb.title}</strong>`;
+                this.selectedToImport.add(nb.id);
+            });
+        }
+
+        if (this.duplicateNotebooks.length > 0) {
+            const dupSection = mainContainer.createDiv();
+            dupSection.style.marginBottom = '20px';
+            
+            const dupTitle = dupSection.createEl('h3');
+            dupTitle.innerHTML = `⚠️ Potential Duplicates (${this.duplicateNotebooks.length})`;
+            dupTitle.style.color = '#ff9800';
+            dupTitle.style.marginTop = '0';
+
+            dupSection.createEl('p', { 
+                text: 'The following notebooks share a very similar title with existing notes in your vault. Select the ones you still want to import:', 
+                cls: 'setting-item-description' 
+            }).style.marginBottom = '10px';
+
+            const listContainer = dupSection.createDiv();
+            listContainer.style.backgroundColor = 'var(--background-secondary)';
+            listContainer.style.border = '1px solid var(--background-modifier-border)';
+            listContainer.style.borderRadius = '6px';
+            listContainer.style.padding = '10px 15px';
+            listContainer.style.maxHeight = '150px';
+            listContainer.style.overflowY = 'auto';
+
+            this.duplicateNotebooks.forEach(nb => {
+                const item = listContainer.createDiv();
+                item.style.fontSize = '0.9em';
+                item.style.padding = '6px 0';
+                item.style.borderBottom = '1px solid var(--background-modifier-border-glow)';
+                item.style.display = 'flex';
+                item.style.alignItems = 'center';
+                item.style.gap = '10px';
+                
+                const checkbox = item.createEl('input', { type: 'checkbox' });
+                checkbox.style.cursor = 'pointer';
+                checkbox.onchange = (e) => {
+                    if (e.target.checked) {
+                        this.selectedToImport.add(nb.id);
+                    } else {
+                        this.selectedToImport.delete(nb.id);
+                    }
+                };
+                
+                const labelDiv = item.createDiv();
+                labelDiv.innerHTML = `<strong>${nb.title}</strong><br><span style="font-size:0.85em; color:var(--text-muted);">${nb.reason}</span>`;
+            });
+        }
+
+        const footer = contentEl.createDiv();
+        footer.style.marginTop = '20px';
+        footer.style.display = 'flex';
+        footer.style.justifyContent = 'flex-end';
+        footer.style.gap = '10px';
+        
+        const cancelBtn = footer.createEl('button', { text: 'Cancel' });
+        cancelBtn.onClickEvent(() => {
+            this.close();
+        });
+        
+        const importBtn = footer.createEl('button', { text: 'Import Selected', cls: 'mod-cta' });
+        importBtn.onClickEvent(async () => {
+            importBtn.disabled = true;
+            importBtn.innerText = 'Importing...';
+            let importedCount = 0;
+            
+            const allNbs = [...this.newNotebooks, ...this.duplicateNotebooks];
+            for (const nb of allNbs) {
+                if (this.selectedToImport.has(nb.id)) {
+                    const success = await this.plugin.createLandingPage(nb);
+                    if (success) importedCount++;
+                }
+            }
+            
+            new obsidian.Notice(`Successfully imported ${importedCount} NotebookLM notebooks!`);
             this.close();
         });
     }
@@ -1117,6 +1398,17 @@ class KnowledgePipelineSettingTab extends obsidian.PluginSettingTab {
                         }
                         await this.app.secretStorage.setSecret(secretId, '');
                         new obsidian.Notice("Success: Saved credentials removed from system keychain!");
+                    }));
+
+            // Button Setting: NotebookLM Sync New Notebooks
+            new obsidian.Setting(containerEl)
+                .setName('NotebookLM Sync New Notebooks')
+                .setDesc('Scans Google NotebookLM for notebooks not yet in your vault, and generates native landing pages for them.')
+                .addButton(button => button
+                    .setButtonText('Sync Notebooks')
+                    .setCta()
+                    .onClick(async () => {
+                        this.plugin.runNotebookSync();
                     }));
 
             // Button Setting: NotebookLM Vault Cleanup
