@@ -46,6 +46,15 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             callback: () => this.runNotebookSync()
         });
 
+        // Setup status bar item for NotebookLM session status
+        this.statusBarItemEl = this.addStatusBarItem();
+        this.updateStatusBar();
+
+        // Setup periodic check every 5 minutes
+        this.registerInterval(
+            window.setInterval(() => this.updateStatusBar(), 5 * 60 * 1000)
+        );
+
         // Run legacy notes buttons migration
         this.app.workspace.onLayoutReady(() => {
             this.migrateExistingNotes();
@@ -633,6 +642,149 @@ actions:
             console.error("Failed to create landing page:", err);
             new obsidian.Notice(`Error creating note for ${nb.title}: ${err.message}`);
             return false;
+        }
+    }
+
+    async launchLogin() {
+        try {
+            const os = require('os');
+            const path = require('path');
+            const fs = require('fs');
+            const child_process = require('child_process');
+
+            new obsidian.Notice("Launching NotebookLM login. Please log in using the browser window that opens...");
+
+            const homeDir = os.homedir();
+            const storagePath = path.join(homeDir, '.notebooklm', 'profiles', 'default', 'storage_state.json');
+
+            // Delete existing storage_state.json first if it exists, so we are sure we get a fresh login
+            if (fs.existsSync(storagePath)) {
+                try {
+                    fs.unlinkSync(storagePath);
+                } catch (e) {
+                    // Backup if unable to delete directly
+                    const bakPath = storagePath + '.bak';
+                    if (fs.existsSync(bakPath)) {
+                        fs.unlinkSync(bakPath);
+                    }
+                    fs.renameSync(storagePath, bakPath);
+                }
+            }
+
+            // Command to run in a separate window and wait
+            const cmd = 'powershell.exe';
+            const args = ['-NoProfile', '-Command', "Start-Process notebooklm -ArgumentList 'login' -Wait"];
+
+            const child = child_process.spawn(cmd, args);
+
+            child.on('close', async (code) => {
+                // Once the window closes, check if the file was created
+                if (!fs.existsSync(storagePath)) {
+                    new obsidian.Notice("Authentication cancelled or failed (storage_state.json not found).");
+                    await this.updateStatusBar();
+                    return;
+                }
+
+                try {
+                    const sessionJson = fs.readFileSync(storagePath, 'utf8');
+                    // Simple validation of the JSON
+                    try {
+                        const parsed = JSON.parse(sessionJson);
+                        if (!parsed.cookies || parsed.cookies.length === 0) {
+                            new obsidian.Notice("Warning: Imported session JSON appears to contain no cookies.");
+                        }
+                    } catch (e) {
+                        new obsidian.Notice("Error: Invalid JSON structure in storage_state.json.");
+                        await this.updateStatusBar();
+                        return;
+                    }
+
+                    // Verify that the credentials are valid by running a test command
+                    const testEnv = Object.assign({}, process.env, {
+                        NOTEBOOKLM_AUTH_JSON: sessionJson.trim()
+                    });
+                    child_process.exec('notebooklm list --json', { env: testEnv, timeout: 10000 }, async (testErr, testStdout, testStderr) => {
+                        const testOutput = (testStdout || '') + (testStderr || '');
+                        if (testErr || testOutput.toLowerCase().includes('not logged in') || testOutput.toLowerCase().includes('expired')) {
+                            new obsidian.Notice(`Authentication check failed: ${testOutput.trim() || 'Invalid credentials'}`);
+                            await this.updateStatusBar();
+                            return;
+                        }
+
+                        // Save to SecretStorage
+                        const secretId = 'knowledge-pipeline-notebooklm-session';
+                        await this.app.secretStorage.setSecret(secretId, sessionJson.trim());
+
+                        // Rename storage_state.json to storage_state.json.bak
+                        const bakPath = storagePath + '.bak';
+                        if (fs.existsSync(bakPath)) {
+                            fs.unlinkSync(bakPath); // Delete old backup if it exists
+                        }
+                        fs.renameSync(storagePath, bakPath);
+
+                        new obsidian.Notice("Success: NotebookLM credentials successfully saved to keychain and local file secured!");
+                        await this.updateStatusBar();
+                    });
+                } catch (err) {
+                    console.error("Import error:", err);
+                    new obsidian.Notice(`Import Failed: ${err.message}`);
+                    await this.updateStatusBar();
+                }
+            });
+
+        } catch (err) {
+            console.error("Login spawn error:", err);
+            new obsidian.Notice(`Failed to start login process: ${err.message}`);
+        }
+    }
+
+    async updateStatusBar() {
+        if (!this.statusBarItemEl) {
+            this.statusBarItemEl = this.addStatusBarItem();
+        }
+        
+        // Bind click handler if not already set
+        this.statusBarItemEl.onclick = () => {
+            this.launchLogin();
+        };
+
+        try {
+            const secretId = 'knowledge-pipeline-notebooklm-session';
+            const sessionJson = await this.app.secretStorage.getSecret(secretId) || '';
+
+            if (!sessionJson) {
+                this.statusBarItemEl.setText("⚠️ Re-auth NotebookLM");
+                this.statusBarItemEl.title = "No credentials found in keychain. Click to launch login.";
+                this.statusBarItemEl.style.color = "var(--text-error)";
+                this.statusBarItemEl.style.cursor = "pointer";
+                return;
+            }
+
+            const child_process = require('child_process');
+            const env = Object.assign({}, process.env, {
+                NOTEBOOKLM_AUTH_JSON: sessionJson
+            });
+
+            child_process.exec('notebooklm list --json', { env: env, timeout: 10000 }, (err, stdout, stderr) => {
+                const output = (stdout || '') + (stderr || '');
+                if (err || output.toLowerCase().includes('not logged in') || output.toLowerCase().includes('expired')) {
+                    this.statusBarItemEl.setText("⚠️ Re-auth NotebookLM");
+                    this.statusBarItemEl.title = `Credentials invalid or expired. Click to launch login. Error: ${output.trim()}`;
+                    this.statusBarItemEl.style.color = "var(--text-error)";
+                    this.statusBarItemEl.style.cursor = "pointer";
+                } else {
+                    this.statusBarItemEl.setText("🧠 NotebookLM: OK");
+                    this.statusBarItemEl.title = "NotebookLM session credentials valid. Click to re-authenticate if needed.";
+                    this.statusBarItemEl.style.color = "var(--text-success)";
+                    this.statusBarItemEl.style.cursor = "pointer";
+                }
+            });
+        } catch (e) {
+            console.error("Failed to update NotebookLM status bar:", e);
+            this.statusBarItemEl.setText("⚠️ Re-auth NotebookLM");
+            this.statusBarItemEl.title = `Error checking status: ${e.message}. Click to launch login.`;
+            this.statusBarItemEl.style.color = "var(--text-error)";
+            this.statusBarItemEl.style.cursor = "pointer";
         }
     }
 }
@@ -1255,91 +1407,7 @@ class KnowledgePipelineSettingTab extends obsidian.PluginSettingTab {
                     .setButtonText('Login & Import')
                     .setCta()
                     .onClick(async () => {
-                        try {
-                            const os = require('os');
-                            const path = require('path');
-                            const fs = require('fs');
-                            const child_process = require('child_process');
-
-                            new obsidian.Notice("Launching NotebookLM login. Please log in using the browser window that opens...");
-
-                            const homeDir = os.homedir();
-                            const storagePath = path.join(homeDir, '.notebooklm', 'profiles', 'default', 'storage_state.json');
-
-                            // Delete existing storage_state.json first if it exists, so we are sure we get a fresh login
-                            if (fs.existsSync(storagePath)) {
-                                try {
-                                    fs.unlinkSync(storagePath);
-                                } catch (e) {
-                                    // Backup if unable to delete directly
-                                    const bakPath = storagePath + '.bak';
-                                    if (fs.existsSync(bakPath)) {
-                                        fs.unlinkSync(bakPath);
-                                    }
-                                    fs.renameSync(storagePath, bakPath);
-                                }
-                            }
-
-                            // Command to run in a separate window and wait
-                            const cmd = 'powershell.exe';
-                            const args = ['-Command', "Start-Process powershell -ArgumentList '-Command', 'notebooklm login' -Wait"];
-
-                            const child = child_process.spawn(cmd, args);
-
-                            child.on('close', async (code) => {
-                                // Once the window closes, check if the file was created
-                                if (!fs.existsSync(storagePath)) {
-                                    new obsidian.Notice("Authentication cancelled or failed (storage_state.json not found).");
-                                    return;
-                                }
-
-                                try {
-                                    const sessionJson = fs.readFileSync(storagePath, 'utf8');
-                                    // Simple validation of the JSON
-                                    try {
-                                        const parsed = JSON.parse(sessionJson);
-                                        if (!parsed.cookies || parsed.cookies.length === 0) {
-                                            new obsidian.Notice("Warning: Imported session JSON appears to contain no cookies.");
-                                        }
-                                    } catch (e) {
-                                        new obsidian.Notice("Error: Invalid JSON structure in storage_state.json.");
-                                        return;
-                                    }
-
-                                    // Verify that the credentials are valid by running a test command
-                                    const testEnv = Object.assign({}, process.env, {
-                                        NOTEBOOKLM_AUTH_JSON: sessionJson.trim()
-                                    });
-                                    child_process.exec('notebooklm list --json', { env: testEnv, timeout: 10000 }, async (testErr, testStdout, testStderr) => {
-                                        const testOutput = (testStdout || '') + (testStderr || '');
-                                        if (testErr || testOutput.toLowerCase().includes('not logged in') || testOutput.toLowerCase().includes('expired')) {
-                                            new obsidian.Notice(`Authentication check failed: ${testOutput.trim() || 'Invalid credentials'}`);
-                                            return;
-                                        }
-
-                                        // Save to SecretStorage
-                                        const secretId = 'knowledge-pipeline-notebooklm-session';
-                                        await this.app.secretStorage.setSecret(secretId, sessionJson.trim());
-
-                                        // Rename storage_state.json to storage_state.json.bak
-                                        const bakPath = storagePath + '.bak';
-                                        if (fs.existsSync(bakPath)) {
-                                            fs.unlinkSync(bakPath); // Delete old backup if it exists
-                                        }
-                                        fs.renameSync(storagePath, bakPath);
-
-                                        new obsidian.Notice("Success: NotebookLM credentials successfully saved to keychain and local file secured!");
-                                    });
-                                } catch (err) {
-                                    console.error("Import error:", err);
-                                    new obsidian.Notice(`Import Failed: ${err.message}`);
-                                }
-                            });
-
-                        } catch (err) {
-                            console.error("Login spawn error:", err);
-                            new obsidian.Notice(`Failed to start login process: ${err.message}`);
-                        }
+                        await this.plugin.launchLogin();
                     }));
 
             // Button Setting: Test CLI Connection
