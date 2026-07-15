@@ -20,8 +20,13 @@ def notify_error(msg):
 
 def run_cli_cmd(args):
     """Runs a notebooklm command and returns the JSON output or throws an error."""
-    # Ensure notebooklm command is in path. Since we installed it via pip in global/active python environment, it should be available.
-    # We run with shell=True on Windows to resolve the path correctly.
+    # Resolve absolute path to notebooklm.exe inside virtual environment
+    if isinstance(args, str) and args.startswith("notebooklm "):
+        venv_dir = os.path.dirname(sys.executable)
+        notebooklm_bin = os.path.join(venv_dir, "notebooklm.exe" if os.name == "nt" else "notebooklm")
+        if os.path.exists(notebooklm_bin):
+            args = args.replace("notebooklm ", f'"{notebooklm_bin}" ', 1)
+
     try:
         res = subprocess.run(
             args,
@@ -35,6 +40,8 @@ def run_cli_cmd(args):
         err_msg = e.stderr or e.stdout
         if "not authenticated" in err_msg.lower() or "login" in err_msg.lower():
             raise RuntimeError("NotebookLM is not authenticated. Please configure/re-import credentials in the Knowledge Pipeline settings tab in Obsidian, or run 'notebooklm login' in your system command prompt/PowerShell first!")
+        if "ratelimiterror" in err_msg.lower():
+            raise RuntimeError("NotebookLM API rate limit reached. Google restricts generating too many audio/video files in a short time. Please wait 10-15 minutes and try again.")
         raise RuntimeError(f"NotebookLM CLI failed: {err_msg.strip()}")
 
 def update_frontmatter_id(file_path, notebook_id):
@@ -229,11 +236,12 @@ def update_mindmap_diagram(file_path, json_path):
             name = node.get("name", "").strip()
             if not name:
                 return
-            cleaned_name = name.replace("(", "[").replace(")", "]").replace('"', "'")
+            cleaned_name = name.replace("[", "(").replace("]", ")").replace('"', "'")
             cleaned_name = latex_to_unicode(cleaned_name)
             indent = "  " * (depth + 1)
             if depth == 0:
-                lines.append(f"{indent}root(( {cleaned_name} ))")
+                root_name = cleaned_name.replace("[", "").replace("]", "").replace("(", "").replace(")", "").replace('"', "").replace("'", "")
+                lines.append(f"{indent}root(( {root_name} ))")
             else:
                 lines.append(f"{indent}[\"{cleaned_name}\"]")
                 
@@ -261,6 +269,28 @@ def update_mindmap_diagram(file_path, json_path):
         notify("Mermaid Mind Map diagram successfully added/updated in note.")
     except Exception as e:
         notify(f"Warning: Could not generate Mermaid Mind Map diagram: {e}")
+
+def update_notebook_summary(file_path, summary_text):
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        section_title = "## 📝 Summarization"
+        summary_block = f"{section_title}\n{summary_text.strip()}\n"
+        
+        if section_title in content:
+            # Replace current summarization block (up to next heading or end of file)
+            pattern = re.escape(section_title) + r".*?(?=\n##|$)"
+            new_content = re.sub(pattern, summary_block, content, flags=re.DOTALL)
+        else:
+            new_content = content.rstrip() + "\n\n" + summary_block + "\n"
+            
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(new_content)
+            
+        notify("AI Summary successfully updated in note.")
+    except Exception as e:
+        notify(f"Warning: Could not update AI Summary in note: {e}")
 
 def check_arxiv_url(url):
     """If url is an arXiv abstract, html, or pdf page, checks if the HTML full text version exists.
@@ -457,9 +487,137 @@ def main():
         else:
             notify(f"Using existing notebook ID: {notebook_id}")
 
+        # Wait for all sources in the notebook to finish processing before generating artifacts
+        try:
+            notify("Verifying that all sources are fully processed and ready...")
+            sources_json = run_cli_cmd(f'notebooklm source list -n {notebook_id} --json')
+            sources = json.loads(sources_json)
+            
+            clean_source_title = None
+            if isinstance(sources, list) and len(sources) > 0:
+                for src in sources:
+                    src_id = src.get("id") or src.get("sourceId")
+                    if src_id:
+                        src_title = src.get("title") or src_id
+                        notify(f"Checking index status of source: '{src_title}'...")
+                        run_cli_cmd(f'notebooklm source wait -n {notebook_id} "{src_id}" --timeout 180')
+                        if src_title and "http" not in src_title.lower() and "www." not in src_title.lower() and len(src_title) > 5:
+                            if not src_title.startswith("Source ") or len(src_title) > 25:
+                                clean_source_title = src_title
+            
+            notify("All sources are ready.")
+            
+            # Fetch AI-generated summary from NotebookLM
+            notebook_summary = ""
+            try:
+                notebook_summary = run_cli_cmd(f'notebooklm summary -n {notebook_id}').strip()
+            except Exception:
+                pass
+
+            # Self-healing: Update frontmatter, title, and filename if they are currently generic/failed
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                note_content = f.read()
+
+            updated = False
+            
+            # 1. Update summary if current is empty or generic
+            if 'summarization: "No summary available."' in note_content or 'summarization: ""' in note_content or 'summarization: "None"' in note_content:
+                if notebook_summary:
+                    safe_summary = notebook_summary.replace("\n", " ").replace('"', '\\"')
+                    note_content = re.sub(
+                        r'summarization:\s*["\']?.*?["\']?(?=\r?\n)',
+                        f'summarization: "{safe_summary}"',
+                        note_content,
+                        count=1
+                    )
+                    note_content = re.sub(
+                        r'## 📝 Summarization\r?\n.*?(?=\r?\n##|$)',
+                        f'## 📝 Summarization\n{notebook_summary}\n',
+                        note_content,
+                        flags=re.DOTALL
+                    )
+                    updated = True
+
+            # 2. Update topic if generic
+            if "topic: General Research" in note_content or "topic: \"\"" in note_content or "topic: ''" in note_content:
+                inferred_topic = "General Research"
+                text_for_topic = (clean_source_title or notebook_summary or "").lower()
+                topic_keywords = {
+                    "Artificial Intelligence": ["ai", "neural", "machine learning", "deep learning", "nlp", "llm", "transformers"],
+                    "Physics": ["physics", "quantum", "gravity", "thermodynamics", "particles", "astronomy", "cosmic"],
+                    "Biology": ["biology", "evolutionary", "cells", "protein", "dna", "rna", "gene", "medical", "brain", "neuroscience"],
+                    "Mathematics": ["math", "calculus", "algebra", "geometry", "graph theory", "equations"],
+                    "Software Development": ["software", "programming", "python", "javascript", "code", "git", "database"]
+                }
+                for top, keywords in topic_keywords.items():
+                    if any(kw in text_for_topic for kw in keywords):
+                        inferred_topic = top
+                        break
+                
+                note_content = re.sub(
+                    r'topic:\s*["\']?.*?["\']?(?=\r?\n)',
+                    f'topic: {inferred_topic}',
+                    note_content,
+                    count=1
+                )
+                updated = True
+
+            # 3. Update title and filename if current title/filename is generic
+            is_generic_title = note_title.startswith("Source ") and ("http" in note_title or "www" in note_title or "2026-" in note_title)
+            if is_generic_title and not clean_source_title:
+                try:
+                    notify("Querying NotebookLM for a clean article title...")
+                    queried_title = run_cli_cmd(f'notebooklm query -n {notebook_id} "What is the exact title of the article or document in this notebook? Respond with ONLY the title. Do not include any extra text, quotes, or markdown."').strip()
+                    queried_title = queried_title.replace('"', '').replace("'", "").strip()
+                    if queried_title and "http" not in queried_title.lower() and len(queried_title) > 5 and len(queried_title) < 150:
+                        clean_source_title = queried_title
+                        notify(f"NotebookLM Query resolved clean title: '{clean_source_title}'")
+                except Exception as e:
+                    notify(f"Warning: Could not query title from NotebookLM: {e}")
+
+            if is_generic_title and clean_source_title:
+                note_content = re.sub(
+                    r'^#\s+.*?(?=\r?\n)',
+                    f'# {clean_source_title}',
+                    note_content,
+                    count=1,
+                    flags=re.MULTILINE
+                )
+                updated = True
+                
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(note_content)
+                updated = False
+                
+                new_clean_title = re.sub(r'[\\/*?:"<>|]', "", clean_source_title)[:60].strip()
+                new_filename = f"{new_clean_title}.md"
+                new_file_path = os.path.join(os.path.dirname(file_path), new_filename)
+                
+                if file_path != new_file_path:
+                    notify(f"Self-healing: Renaming generic note file to '{new_filename}'...")
+                    if os.path.exists(new_file_path):
+                        os.remove(new_file_path)
+                    os.rename(file_path, new_file_path)
+                    file_path = new_file_path
+                    clean_title = new_clean_title
+                    note_title = clean_source_title
+
+            if updated:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(note_content)
+
+        except Exception as e:
+            notify(f"Warning: Could not verify sources readiness or self-heal metadata: {e}")
+
         # 3. Generate Artifact
         notify(f"Generating {artifact_type} in NotebookLM (this might take a minute)...")
-        if artifact_type == "mind-map":
+        if artifact_type == "summary":
+            notify("Fetching AI-generated notebook summary...")
+            summary_output = run_cli_cmd(f'notebooklm summary -n {notebook_id}')
+            update_notebook_summary(file_path, summary_output)
+            notify("Summary updated successfully.")
+            
+        elif artifact_type == "mind-map":
             run_cli_cmd(f'notebooklm generate mind-map -n {notebook_id} --json')
             notify("Mind Map generation complete.")
             
@@ -483,14 +641,22 @@ def main():
             notify("Success! Mind Map generated and added as a Mermaid diagram.")
 
         elif artifact_type == "audio":
-            notify("Starting audio overview generation (debate format). This takes 1-3 minutes...")
-            run_cli_cmd(f'notebooklm generate audio -n {notebook_id} --wait --json')
+            notify("Starting audio overview generation (deep-dive format). This takes 1-3 minutes...")
+            run_cli_cmd(f'notebooklm generate audio -n {notebook_id} --format deep-dive --wait --retry 5 --json')
             notify("Audio generation complete.")
             
             dest_filename = f"{clean_title} Podcast.mp3"
             dest_path = os.path.join(ATTACHMENTS_DIR, dest_filename)
             notify("Downloading Podcast Audio...")
-            run_cli_cmd(f'notebooklm download audio -n {notebook_id} --latest "{dest_path}"')
+            import tempfile
+            temp_audio_path = os.path.join(tempfile.gettempdir(), f"temp_{dest_filename}")
+            if os.path.exists(temp_audio_path):
+                try:
+                    os.remove(temp_audio_path)
+                except Exception:
+                    pass
+            run_cli_cmd(f'notebooklm download audio -n {notebook_id} --latest "{temp_audio_path}"')
+            shutil.move(temp_audio_path, dest_path)
             
             update_attachment_link(file_path, "Podcast Audio", f"99_System/Attachments/{dest_filename}", "Podcast (MP3)")
             notify(f"Success! Podcast downloaded and linked to note: {dest_filename}")
@@ -498,26 +664,42 @@ def main():
         elif artifact_type == "cinematic-video":
             notify("Starting video overview generation. This takes 1-3 minutes...")
             try:
-                run_cli_cmd(f'notebooklm generate cinematic-video -n {notebook_id} --wait --json')
+                run_cli_cmd(f'notebooklm generate cinematic-video -n {notebook_id} --wait --retry 5 --json')
                 notify("Cinematic video generation complete.")
                 
                 dest_filename = f"{clean_title} Video.mp4"
                 dest_path = os.path.join(ATTACHMENTS_DIR, dest_filename)
                 notify("Downloading Cinematic Video File...")
-                run_cli_cmd(f'notebooklm download cinematic-video -n {notebook_id} --latest "{dest_path}"')
+                import tempfile
+                temp_video_path = os.path.join(tempfile.gettempdir(), f"temp_{dest_filename}")
+                if os.path.exists(temp_video_path):
+                    try:
+                        os.remove(temp_video_path)
+                    except Exception:
+                        pass
+                run_cli_cmd(f'notebooklm download cinematic-video -n {notebook_id} --latest "{temp_video_path}"')
+                shutil.move(temp_video_path, dest_path)
             except Exception as e:
                 err_str = str(e).lower()
                 if "not authenticated" in err_str or "login" in err_str:
                     raise e
                 else:
                     notify(f"Warning: Cinematic video generation failed: {e}. Falling back to standard video overview...")
-                    run_cli_cmd(f'notebooklm generate video -n {notebook_id} --wait --json')
+                    run_cli_cmd(f'notebooklm generate video -n {notebook_id} --wait --retry 5 --json')
                     notify("Standard video generation complete.")
                     
                     dest_filename = f"{clean_title} Video.mp4"
                     dest_path = os.path.join(ATTACHMENTS_DIR, dest_filename)
                     notify("Downloading Video File...")
-                    run_cli_cmd(f'notebooklm download video -n {notebook_id} --latest "{dest_path}"')
+                    import tempfile
+                    temp_video_path = os.path.join(tempfile.gettempdir(), f"temp_{dest_filename}")
+                    if os.path.exists(temp_video_path):
+                        try:
+                            os.remove(temp_video_path)
+                        except Exception:
+                            pass
+                    run_cli_cmd(f'notebooklm download video -n {notebook_id} --latest "{temp_video_path}"')
+                    shutil.move(temp_video_path, dest_path)
             
             update_attachment_link(file_path, "Cinematic Video", f"99_System/Attachments/{dest_filename}", "Video (MP4)")
             notify(f"Success! Video downloaded and linked to note: {dest_filename}")

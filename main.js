@@ -6,10 +6,36 @@ const DEFAULT_SETTINGS = {
     llmProvider: 'gemini',
     llmModel: 'gemini-2.5-flash',
     customModel: '',
-    ollamaUrl: 'http://localhost:11434'
+    ollamaUrl: 'http://localhost:11434',
+    pdfSourceFolder: 'G:/My Drive/Research Papers and Textbooks',
+    pdfOutputFolder: '03_Knowledge',
+    mistralApiKeyId: 'knowledge-pipeline-mistral-api-key',
+    notebooklmBrowser: 'manual'
 };
 
 class KnowledgePipelinePlugin extends obsidian.Plugin {
+    getPythonCmd() {
+        const path = require('path');
+        const fs = require('fs');
+        const vaultPath = this.app.vault.adapter.getBasePath();
+        const venvPython = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline', '.venv', 'Scripts', 'python.exe');
+        if (fs.existsSync(venvPython)) {
+            return venvPython;
+        }
+        return 'python';
+    }
+
+    getNotebooklmCmd() {
+        const path = require('path');
+        const fs = require('fs');
+        const vaultPath = this.app.vault.adapter.getBasePath();
+        const venvCmd = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline', '.venv', 'Scripts', 'notebooklm.exe');
+        if (fs.existsSync(venvCmd)) {
+            return venvCmd;
+        }
+        return 'notebooklm';
+    }
+
     async onload() {
         await this.loadSettings();
 
@@ -21,6 +47,13 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             id: 'process-imports',
             name: 'Import and Summarize Share Links',
             callback: () => this.processImports()
+        });
+
+        // Add command to process PDFs
+        this.addCommand({
+            id: 'process-pdfs',
+            name: 'Index Google Drive PDFs',
+            callback: () => this.processPDFs()
         });
 
         // Add commands for NotebookLM generation
@@ -38,6 +71,18 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             id: 'generate-video',
             name: 'NotebookLM: Generate Cinematic Video',
             callback: () => this.runArtifactGenerator('cinematic-video')
+        });
+
+        this.addCommand({
+            id: 'generate-summary',
+            name: 'NotebookLM: Generate AI Summary',
+            callback: () => this.runArtifactGenerator('summary')
+        });
+
+        this.addCommand({
+            id: 'structure-active-note',
+            name: 'Structure and Summarize Active Link Note',
+            callback: () => this.processActiveNote()
         });
 
         this.addCommand({
@@ -69,6 +114,86 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
         await this.saveData(this.settings);
     }
 
+    async processPDFs() {
+        const loadingNotice = new obsidian.Notice("Indexing PDFs from Google Drive... please wait.", 0);
+        try {
+            const child_process = require('child_process');
+            const path = require('path');
+            const fs = require('fs');
+
+            const vaultPath = this.app.vault.adapter.getBasePath();
+            const scriptPath = path.join(vaultPath, '99_System', 'Scripts', 'import_research.py');
+
+            if (!fs.existsSync(scriptPath)) {
+                loadingNotice.hide();
+                new obsidian.Notice(`Error: Indexer script not found at ${scriptPath}`);
+                return;
+            }
+
+            const pythonCmd = this.getPythonCmd();
+            const sourceDir = this.settings.pdfSourceFolder || 'G:/My Drive/Research Papers and Textbooks';
+            const outputDir = path.join(vaultPath, this.settings.pdfOutputFolder || '03_Knowledge');
+            
+            // Retrieve Mistral Key
+            let mistralApiKey = await this.app.secretStorage.getSecret('knowledge-pipeline-mistral-api-key') || '';
+            if (!mistralApiKey) {
+                try {
+                    const markerConfigPath = path.join(vaultPath, '.obsidian', 'plugins', 'marker-api', 'data.json');
+                    if (fs.existsSync(markerConfigPath)) {
+                        const markerConfig = JSON.parse(fs.readFileSync(markerConfigPath, 'utf8'));
+                        mistralApiKey = markerConfig.mistralaiApiKey || '';
+                    }
+                } catch (e) {
+                    console.error("Failed to read fallback marker-api config:", e);
+                }
+            }
+
+            let cmd = `"${pythonCmd}" -u "${scriptPath}" --source-dir "${sourceDir}" --output-dir "${outputDir}"`;
+            if (mistralApiKey) {
+                cmd += ` --mistral-key "${mistralApiKey}"`;
+            } else {
+                cmd += ` --skip-api`;
+                new obsidian.Notice("Mistral API key not found. Skipping summaries (Outlines only).");
+            }
+            
+            console.log("[Knowledge Pipeline] Running PDF Indexer Command:", cmd);
+            
+            child_process.exec(cmd, { timeout: 300000 }, (err, stdout, stderr) => {
+                loadingNotice.hide();
+                if (err) {
+                    console.error("PDF Indexing failed:", stderr || stdout);
+                    new obsidian.Notice(`PDF Indexing Failed: ${stderr || stdout}`);
+                } else {
+                    new obsidian.Notice(`PDF Indexing Complete!\n${stdout.trim()}`);
+                }
+            });
+        } catch (err) {
+            loadingNotice.hide();
+            new obsidian.Notice(`PDF Indexing Failed: ${err.message}`);
+        }
+    }
+
+    async processActiveNote() {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile) {
+            new obsidian.Notice("Error: No active file found! Please open a note first.");
+            return;
+        }
+        
+        const loadingNotice = new obsidian.Notice(`Processing active note: ${activeFile.name}...`, 0);
+        try {
+            const success = await this.processNoteFile(activeFile);
+            loadingNotice.hide();
+            if (success) {
+                new obsidian.Notice(`Successfully structured and summarized: ${activeFile.name}`);
+            }
+        } catch (e) {
+            loadingNotice.hide();
+            console.error("Failed to process active note:", e);
+            new obsidian.Notice(`Processing failed: ${e.message}`);
+        }
+    }
+
     async processImports() {
         try {
             new obsidian.Notice("Scanning imports folder...");
@@ -80,11 +205,6 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             let errors = 0;
             let matchedFilesCount = 0;
             
-            if (!this.app.secretStorage) {
-                new obsidian.Notice("Error: secretStorage is not available in this Obsidian version!");
-                return;
-            }
-            
             new obsidian.Notice(`Found ${files.length} markdown files in vault.`);
 
             // Loop through all markdown files in the target folder
@@ -95,93 +215,132 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
                 if (normalizedPath.startsWith(targetPrefix)) {
                     matchedFilesCount++;
                     try {
-                        const content = await this.app.vault.read(file);
-                        
-                        // Skip files that are already structured
-                        if (content.trim().startsWith("---") && content.includes("url:")) {
-                            continue;
+                        const success = await this.processNoteFile(file);
+                        if (success) {
+                            convertedCount++;
                         }
                         
-                        // Find URL
-                        const urls = content.match(/https?:\/\/[^\s\)\]\u200b]+/g);
-                        let targetUrl = null;
-                        if (urls) {
-                            for (let url of urls) {
-                                if (!url.includes('keep.google.com')) {
-                                    targetUrl = url;
-                                    break;
-                                }
-                            }
+                        if (convertedCount >= 10) {
+                            new obsidian.Notice("Processed limit of 10 unstructured files.");
+                            break;
                         }
-                        
-                        if (!targetUrl) {
-                            new obsidian.Notice(`File ${file.name} has no valid URLs.`);
-                            continue; // Not a link note
-                        }
-                        
-                        // Clean brackets/parentheses from url end/start
-                        targetUrl = targetUrl.replace(/^[\[\(\{\s]+|[\]\)\}\s]+$/g, '');
-                        
-                        new obsidian.Notice(`Scraping: ${file.name}`);
-                        
-                        // 1. Scrape URL
-                        const pageData = await this.scrapeUrl(targetUrl);
-                        
-                        let title = file.basename;
-                        let description = "";
-                        let body = "";
-                        
-                        if (pageData) {
-                            description = pageData.description || "";
-                            body = pageData.body || "";
-                            if (pageData.title && pageData.title.length > 10) {
-                                title = pageData.title;
-                            }
-                        } else {
-                            new obsidian.Notice(`Warning: Scraping failed for ${targetUrl}. Using heuristics.`);
-                        }
-                        
-                        // Clean title for markdown heading/YAML
-                        title = title.replace(/\n/g, " ").replace(/"/g, '\\"').trim();
-                        
-                        let summary = "";
-                        if (this.settings.llmProvider === 'ollama') {
-                            const ollamaUrl = this.settings.ollamaUrl || 'http://localhost:11434';
-                            const modelName = this.settings.llmModel || 'qwen2.5:7b';
-                            new obsidian.Notice(`Summarizing with Ollama: ${file.name}`);
-                            summary = await this.getOllamaSummary(ollamaUrl, modelName, title, description, body);
-                        } else {
-                            const secretId = this.settings.geminiApiKeyId || 'knowledge-pipeline-gemini-api-key';
-                            let geminiApiKey = await this.app.secretStorage.getSecret(secretId) || '';
-                            if (!geminiApiKey) {
-                                geminiApiKey = await this.app.secretStorage.getSecret('timeblocker-gemini-api-key') || '';
-                            }
-                            
-                            if (!geminiApiKey) {
-                                new obsidian.Notice("Error: Gemini API key is missing! Please configure it in settings.");
-                                continue;
-                            }
-                            
-                            const modelName = this.settings.llmModel || 'gemini-2.5-flash';
-                            new obsidian.Notice(`Summarizing with Gemini: ${file.name}`);
-                            summary = await this.getGeminiSummary(geminiApiKey, modelName, title, description, body);
-                        }
-                        
-                        // Guess general topic based on title keywords
-                        let topic = "General Research";
-                        const keywords = ["quantum", "ai", "physics", "biology", "brain", "neuroscience", "math", "software", "google", "git", "sql"];
-                        for (const kw of keywords) {
-                            if (title.toLowerCase().includes(kw)) {
-                                topic = kw.charAt(0).toUpperCase() + kw.slice(1);
-                                break;
-                            }
-                        }
-                        
-                        const structuredContent = `---
+                    } catch (e) {
+                        console.error(`Error processing file ${file.path}:`, e);
+                        new obsidian.Notice(`Error processing ${file.name}: ${e.message}`);
+                        errors++;
+                    }
+                }
+            }
+            
+            new obsidian.Notice(`Matched ${matchedFilesCount} files in '${importsFolder}'. Converted: ${convertedCount}, Errors: ${errors}`);
+        } catch (globalError) {
+            console.error("Global pipeline error:", globalError);
+            new obsidian.Notice(`Global Pipeline Error: ${globalError.message}`);
+        }
+    }
+
+    async processNoteFile(file) {
+        if (!this.app.secretStorage) {
+            throw new Error("secretStorage is not available in this Obsidian version!");
+        }
+
+        const content = await this.app.vault.read(file);
+        
+        // Skip files that are already structured (unless triggered manually via command on active note)
+        const isActiveNote = this.app.workspace.getActiveFile()?.path === file.path;
+        if (!isActiveNote && content.trim().startsWith("---") && content.includes("url:")) {
+            return false;
+        }
+        
+        // Find URL
+        const urls = content.match(/https?:\/\/[^\s\)\]\u200b]+/g);
+        let targetUrl = null;
+        if (urls) {
+            for (let url of urls) {
+                if (!url.includes('keep.google.com')) {
+                    targetUrl = url;
+                    break;
+                }
+            }
+        }
+        
+        if (!targetUrl) {
+            new obsidian.Notice(`File ${file.name} has no valid URLs.`);
+            return false; // Not a link note
+        }
+        
+        // Clean brackets/parentheses from url end/start
+        targetUrl = targetUrl.replace(/^[\[\(\{\s]+|[\]\)\}\s]+$/g, '');
+        
+        new obsidian.Notice(`Scraping: ${file.name}`);
+        
+        // 1. Scrape URL
+        const pageData = await this.scrapeUrl(targetUrl);
+        
+        let title = file.basename;
+        let description = "";
+        let body = "";
+        
+        if (pageData) {
+            description = pageData.description || "";
+            body = pageData.body || "";
+            if (pageData.title && pageData.title.length > 10) {
+                title = pageData.title;
+            }
+        } else {
+            new obsidian.Notice(`Warning: Scraping failed for ${targetUrl}. Using heuristics.`);
+        }
+        
+        // Clean title for markdown heading/YAML
+        title = title.replace(/\n/g, " ").replace(/"/g, '\\"').trim();
+        
+        let summary = "";
+        if (this.settings.llmProvider === 'ollama') {
+            const ollamaUrl = this.settings.ollamaUrl || 'http://localhost:11434';
+            const modelName = this.settings.llmModel || 'qwen2.5:7b';
+            new obsidian.Notice(`Summarizing with Ollama: ${file.name}`);
+            summary = await this.getOllamaSummary(ollamaUrl, modelName, title, description, body);
+        } else {
+            const secretId = this.settings.geminiApiKeyId || 'knowledge-pipeline-gemini-api-key';
+            let geminiApiKey = await this.app.secretStorage.getSecret(secretId) || '';
+            if (!geminiApiKey) {
+                geminiApiKey = await this.app.secretStorage.getSecret('timeblocker-gemini-api-key') || '';
+            }
+            
+            if (!geminiApiKey) {
+                throw new Error("Gemini API key is missing! Please configure it in settings.");
+            }
+            
+            const modelName = this.settings.llmModel || 'gemini-2.5-flash';
+            new obsidian.Notice(`Summarizing with Gemini: ${file.name}`);
+            summary = await this.getGeminiSummary(geminiApiKey, modelName, title, description, body);
+        }
+        
+        // Guess general topic based on title keywords
+        let topic = "General Research";
+        const keywords = ["quantum", "ai", "physics", "biology", "brain", "neuroscience", "math", "software", "google", "git", "sql"];
+        for (const kw of keywords) {
+            if (title.toLowerCase().includes(kw)) {
+                topic = kw.charAt(0).toUpperCase() + kw.slice(1);
+                break;
+            }
+        }
+        
+        // Try to keep existing notebook_id if it exists in the note
+        let notebookId = "";
+        const notebookIdMatch = content.match(/notebook_id:\s*["\']?([a-zA-Z0-9_-]+)/);
+        if (notebookIdMatch) {
+            notebookId = notebookIdMatch[1].trim();
+        }
+
+        const todayStr = new Date().toISOString().split('T')[0];
+        const structuredContent = `---
 url: ${targetUrl}
 topic: ${topic}
 summarization: "${summary.replace(/"/g, '\\"')}"
-notebook_id: ""
+notebook_id: "${notebookId}"
+status: "📥 Inbox"
+added_date: "${todayStr}"
 ---
 # ${title}
 
@@ -191,6 +350,15 @@ notebook_id: ""
 ${summary}
 
 ## 🛠️ NotebookLM Artifacts
+\`\`\`meta-bind-button
+label: 📝 Generate NotebookLM Summary
+icon: "file-text"
+style: primary
+hidden: false
+actions:
+  - type: command
+    command: knowledge-pipeline:generate-summary
+\`\`\`
 \`\`\`meta-bind-button
 label: 🧠 Generate Mind Map
 icon: "git-branch"
@@ -223,27 +391,32 @@ actions:
 - **Podcast Audio**: 
 - **Cinematic Video**: 
 `;
-                        await this.app.vault.modify(file, structuredContent);
-                        convertedCount++;
-                        new obsidian.Notice(`Successfully structured: ${file.name}`);
-                        
-                        if (convertedCount >= 10) {
-                            new obsidian.Notice("Processed limit of 10 unstructured files.");
-                            break;
-                        }
-                    } catch (e) {
-                        console.error(`Error processing file ${file.path}:`, e);
-                        new obsidian.Notice(`Error processing ${file.name}: ${e.message}`);
-                        errors++;
-                    }
-                }
+        await this.app.vault.modify(file, structuredContent);
+
+        // Auto-rename note and move to "00_Imports/Learning Queue/"
+        try {
+            let safeTitle = title.replace(/[\\/:*?"<>|]/g, "").trim();
+            if (!safeTitle) safeTitle = file.basename;
+            
+            const queueFolder = `${importsFolder}/Learning Queue`;
+            const fs = require('fs');
+            const path = require('path');
+            const vaultPath = this.app.vault.adapter.getBasePath();
+            const absQueueFolder = path.join(vaultPath, queueFolder.replace(/\//g, path.sep));
+            if (!fs.existsSync(absQueueFolder)) {
+                fs.mkdirSync(absQueueFolder, { recursive: true });
             }
             
-            new obsidian.Notice(`Matched ${matchedFilesCount} files in '${importsFolder}'. Converted: ${convertedCount}, Errors: ${errors}`);
-        } catch (globalError) {
-            console.error("Global pipeline error:", globalError);
-            new obsidian.Notice(`Global Pipeline Error: ${globalError.message}`);
+            const newPath = `${queueFolder}/${safeTitle}.md`;
+            if (file.path !== newPath) {
+                await this.app.fileManager.renameFile(file, newPath);
+                new obsidian.Notice(`Moved and renamed note to: ${newPath}`);
+            }
+        } catch (renameErr) {
+            console.error("Failed to move/rename file:", renameErr);
         }
+
+        return true;
     }
 
     async scrapeUrl(url) {
@@ -421,7 +594,7 @@ Content: ${body}`;
                 NOTEBOOKLM_AUTH_JSON: sessionJson
             });
 
-            const child = child_process.spawn('python', ['-u', scriptPath, absoluteFilePath, type], {
+            const child = child_process.spawn(this.getPythonCmd(), ['-u', scriptPath, absoluteFilePath, type], {
                 cwd: path.dirname(scriptPath),
                 env: env
             });
@@ -537,7 +710,7 @@ Content: ${body}`;
                 NOTEBOOKLM_AUTH_JSON: sessionJson
             });
 
-            child_process.execFile('python', ['-u', scriptPath, vaultPath], { cwd: path.dirname(scriptPath), env: env, maxBuffer: 1024 * 1024 * 10 }, (err, stdout, stderr) => {
+            child_process.execFile(this.getPythonCmd(), ['-u', scriptPath, vaultPath], { cwd: path.dirname(scriptPath), env: env, maxBuffer: 1024 * 1024 * 10 }, (err, stdout, stderr) => {
                 loadingNotice.hide();
                 if (err) {
                     console.error("Sync scan failed:", stderr || stdout);
@@ -578,7 +751,16 @@ Content: ${body}`;
             let title = nb.title.replace(/[\/\\:*?"<>|]/g, '-').trim();
             if (!title) title = nb.id;
             
-            const targetPrefix = importsFolder.replace(/\\/g, '/').replace(/\/+$/, '') + '/';
+            const queueFolder = `${importsFolder.replace(/\\/g, '/').replace(/\/+$/, '')}/Learning Queue`;
+            const fs = require('fs');
+            const path = require('path');
+            const vaultPath = this.app.vault.adapter.getBasePath();
+            const absQueueFolder = path.join(vaultPath, queueFolder.replace(/\//g, path.sep));
+            if (!fs.existsSync(absQueueFolder)) {
+                fs.mkdirSync(absQueueFolder, { recursive: true });
+            }
+            
+            const targetPrefix = queueFolder + '/';
             let targetPath = `${targetPrefix}${title}.md`;
             
             let counter = 1;
@@ -590,11 +772,14 @@ Content: ${body}`;
             const targetUrl = `https://notebooklm.google.com/notebook/${nb.id}`;
             const summary = "Imported from NotebookLM sync. Click buttons to generate artifacts.";
             
+            const todayStr = new Date().toISOString().split('T')[0];
             const structuredContent = `---
 url: ${targetUrl}
 topic: NotebookLM Import
 summarization: "${summary}"
 notebook_id: "${nb.id}"
+status: "📥 Inbox"
+added_date: "${todayStr}"
 ---
 # ${title}
 
@@ -604,6 +789,15 @@ notebook_id: "${nb.id}"
 ${summary}
 
 ## 🛠️ NotebookLM Artifacts
+\`\`\`meta-bind-button
+label: 📝 Generate NotebookLM Summary
+icon: "file-text"
+style: primary
+hidden: false
+actions:
+  - type: command
+    command: knowledge-pipeline:generate-summary
+\`\`\`
 \`\`\`meta-bind-button
 label: 🧠 Generate Mind Map
 icon: "git-branch"
@@ -671,11 +865,26 @@ actions:
                 }
             }
 
-            // Command to run in a separate window and wait
-            const cmd = 'powershell.exe';
-            const args = ['-NoProfile', '-Command', "Start-Process notebooklm -ArgumentList 'login' -Wait"];
+            // Command to run in a separate window and wait (shows terminal errors clearly)
+            const cmd = 'cmd.exe';
+            const vaultPath = this.app.vault.adapter.getBasePath();
+            const pluginDir = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline');
+            const notebooklmBrowserSetting = this.settings.notebooklmBrowser || 'manual';
+            let browserArg = '';
+            if (notebooklmBrowserSetting !== 'manual') {
+                browserArg = ` --browser ${notebooklmBrowserSetting}`;
+            }
+            const args = [
+                '/c',
+                'start',
+                'NotebookLM Login', // Explicit title avoids start's quote parsing bugs
+                '/wait',
+                'cmd',
+                '/k',
+                `.\\.venv\\Scripts\\notebooklm.exe login${browserArg}`
+            ];
 
-            const child = child_process.spawn(cmd, args);
+            const child = child_process.spawn(cmd, args, { cwd: pluginDir });
 
             child.on('close', async (code) => {
                 // Once the window closes, check if the file was created
@@ -703,7 +912,8 @@ actions:
                     const testEnv = Object.assign({}, process.env, {
                         NOTEBOOKLM_AUTH_JSON: sessionJson.trim()
                     });
-                    child_process.exec('notebooklm list --json', { env: testEnv, timeout: 10000 }, async (testErr, testStdout, testStderr) => {
+                    const notebooklmCmd = this.getNotebooklmCmd();
+                    child_process.exec(`"${notebooklmCmd}" list --json`, { env: testEnv, timeout: 10000 }, async (testErr, testStdout, testStderr) => {
                         const testOutput = (testStdout || '') + (testStderr || '');
                         if (testErr || testOutput.toLowerCase().includes('not logged in') || testOutput.toLowerCase().includes('expired')) {
                             new obsidian.Notice(`Authentication check failed: ${testOutput.trim() || 'Invalid credentials'}`);
@@ -743,10 +953,23 @@ actions:
             this.statusBarItemEl = this.addStatusBarItem();
         }
         
-        // Bind click handler if not already set
+        // Bind click handler dynamically depending on setting
+        const selectedBrowser = this.settings.notebooklmBrowser || 'manual';
         this.statusBarItemEl.onclick = () => {
-            this.launchLogin();
+            if (selectedBrowser !== 'manual') {
+                this.launchSilentBrowserAuth(selectedBrowser, false);
+            } else {
+                this.launchLogin();
+            }
         };
+
+        // Periodic keepalive / refresh session
+        const now = Date.now();
+        if (!this.lastRefreshTime || (now - this.lastRefreshTime > 15 * 60 * 1000)) {
+            this.lastRefreshTime = now;
+            // Run silent background refresh
+            this.refreshSession(true);
+        }
 
         try {
             const secretId = 'knowledge-pipeline-notebooklm-session';
@@ -765,13 +988,22 @@ actions:
                 NOTEBOOKLM_AUTH_JSON: sessionJson
             });
 
-            child_process.exec('notebooklm list --json', { env: env, timeout: 10000 }, (err, stdout, stderr) => {
+            const notebooklmCmd = this.getNotebooklmCmd();
+            child_process.exec(`"${notebooklmCmd}" list --json`, { env: env, timeout: 10000 }, (err, stdout, stderr) => {
                 const output = (stdout || '') + (stderr || '');
                 if (err || output.toLowerCase().includes('not logged in') || output.toLowerCase().includes('expired')) {
                     this.statusBarItemEl.setText("⚠️ Re-auth NotebookLM");
-                    this.statusBarItemEl.title = `Credentials invalid or expired. Click to launch login. Error: ${output.trim()}`;
+                    this.statusBarItemEl.title = `Credentials invalid or expired. Click to re-auth. Error: ${output.trim()}`;
                     this.statusBarItemEl.style.color = "var(--text-error)";
                     this.statusBarItemEl.style.cursor = "pointer";
+
+                    // Auto silent re-auth if browser option is enabled and not already running / recently run
+                    if (selectedBrowser !== 'manual' && !this.isSilentAuthInProgress) {
+                        const timeSinceLastAuth = now - (this.lastSilentAuthTime || 0);
+                        if (timeSinceLastAuth > 5 * 60 * 1000) { // minimum 5 min throttle
+                            this.launchSilentBrowserAuth(selectedBrowser, true);
+                        }
+                    }
                 } else {
                     this.statusBarItemEl.setText("🧠 NotebookLM: OK");
                     this.statusBarItemEl.title = "NotebookLM session credentials valid. Click to re-authenticate if needed.";
@@ -782,9 +1014,176 @@ actions:
         } catch (e) {
             console.error("Failed to update NotebookLM status bar:", e);
             this.statusBarItemEl.setText("⚠️ Re-auth NotebookLM");
-            this.statusBarItemEl.title = `Error checking status: ${e.message}. Click to launch login.`;
+            this.statusBarItemEl.title = `Error checking status: ${e.message}. Click to re-auth.`;
             this.statusBarItemEl.style.color = "var(--text-error)";
             this.statusBarItemEl.style.cursor = "pointer";
+        }
+    }
+
+    async launchSilentBrowserAuth(browser, quiet = false) {
+        if (this.isSilentAuthInProgress) return;
+        this.isSilentAuthInProgress = true;
+        this.lastSilentAuthTime = Date.now();
+
+        try {
+            const os = require('os');
+            const path = require('path');
+            const fs = require('fs');
+            const child_process = require('child_process');
+
+            if (!quiet) new obsidian.Notice(`Extracting cookies silently from ${browser}...`);
+
+            const homeDir = os.homedir();
+            const storagePath = path.join(homeDir, '.notebooklm', 'profiles', 'default', 'storage_state.json');
+
+            // Delete existing storage_state.json first if it exists
+            if (fs.existsSync(storagePath)) {
+                try {
+                    fs.unlinkSync(storagePath);
+                } catch (e) {
+                    const bakPath = storagePath + '.bak';
+                    if (fs.existsSync(bakPath)) {
+                        fs.unlinkSync(bakPath);
+                    }
+                    fs.renameSync(storagePath, bakPath);
+                }
+            }
+
+            const notebooklmCmd = this.getNotebooklmCmd();
+            
+            child_process.exec(`"${notebooklmCmd}" login --browser-cookies ${browser}`, { timeout: 15000 }, async (err, stdout, stderr) => {
+                this.isSilentAuthInProgress = false;
+                const output = (stdout || '') + (stderr || '');
+                console.log("[NotebookLM silent login]", output);
+
+                if (!fs.existsSync(storagePath)) {
+                    if (!quiet) {
+                        if (output.toLowerCase().includes("lock") || output.toLowerCase().includes("database is locked")) {
+                            new obsidian.Notice(`Failed: Browser database is locked. Close ${browser} completely and try again.`);
+                        } else if (output.toLowerCase().includes("permission")) {
+                            new obsidian.Notice("Failed: Permission denied reading browser cookies.");
+                        } else {
+                            new obsidian.Notice(`Failed to extract cookies: ${output.trim() || 'storage_state.json not found'}`);
+                        }
+                    }
+                    await this.updateStatusBar();
+                    return;
+                }
+
+                try {
+                    const sessionJson = fs.readFileSync(storagePath, 'utf8');
+                    // Simple validation of the JSON
+                    try {
+                        const parsed = JSON.parse(sessionJson);
+                        if (!parsed.cookies || parsed.cookies.length === 0) {
+                            if (!quiet) new obsidian.Notice("Warning: Extracted session JSON appears to contain no cookies.");
+                        }
+                    } catch (e) {
+                        if (!quiet) new obsidian.Notice("Error: Invalid JSON structure in storage_state.json.");
+                        await this.updateStatusBar();
+                        return;
+                    }
+
+                    // Save to SecretStorage
+                    const secretId = 'knowledge-pipeline-notebooklm-session';
+                    await this.app.secretStorage.setSecret(secretId, sessionJson.trim());
+
+                    // Clean up storage_state.json
+                    const bakPath = storagePath + '.bak';
+                    if (fs.existsSync(bakPath)) {
+                        fs.unlinkSync(bakPath);
+                    }
+                    fs.renameSync(storagePath, bakPath);
+
+                    if (!quiet) new obsidian.Notice(`Success: NotebookLM authenticated silently using ${browser} cookies!`);
+                    await this.updateStatusBar();
+                } catch (importErr) {
+                    console.error("Silent login import error:", importErr);
+                    if (!quiet) new obsidian.Notice(`Import Failed: ${importErr.message}`);
+                    await this.updateStatusBar();
+                }
+            });
+        } catch (err) {
+            this.isSilentAuthInProgress = false;
+            console.error("Silent login spawn error:", err);
+            if (!quiet) new obsidian.Notice(`Failed to start silent login: ${err.message}`);
+        }
+    }
+
+    async refreshSession(quiet = false) {
+        try {
+            const os = require('os');
+            const path = require('path');
+            const fs = require('fs');
+            const child_process = require('child_process');
+
+            const secretId = 'knowledge-pipeline-notebooklm-session';
+            const sessionJson = await this.app.secretStorage.getSecret(secretId) || '';
+
+            if (!sessionJson) {
+                if (!quiet) new obsidian.Notice("NotebookLM: No saved credentials in keychain to refresh.");
+                return false;
+            }
+
+            const homeDir = os.homedir();
+            const storagePath = path.join(homeDir, '.notebooklm', 'profiles', 'default', 'storage_state.json');
+
+            // 1. Write the current keychain credentials back to disk temporarily
+            const profileDir = path.dirname(storagePath);
+            if (!fs.existsSync(profileDir)) {
+                fs.mkdirSync(profileDir, { recursive: true });
+            }
+            fs.writeFileSync(storagePath, sessionJson.trim(), 'utf8');
+
+            // 2. Run notebooklm auth refresh
+            const notebooklmCmd = this.getNotebooklmCmd();
+            
+            return new Promise((resolve) => {
+                child_process.exec(`"${notebooklmCmd}" auth refresh --quiet`, { timeout: 20000 }, async (err, stdout, stderr) => {
+                    const output = (stdout || '') + (stderr || '');
+                    
+                    if (err) {
+                        console.error("[NotebookLM refresh failed]", err, output);
+                        if (!quiet) new obsidian.Notice(`NotebookLM session refresh failed: ${output.trim()}`);
+                        
+                        // Clean up disk file
+                        if (fs.existsSync(storagePath)) {
+                            fs.unlinkSync(storagePath);
+                        }
+                        resolve(false);
+                        return;
+                    }
+
+                    // 3. Read the rotated cookies from storage_state.json back into the secure keychain
+                    if (fs.existsSync(storagePath)) {
+                        try {
+                            const newSessionJson = fs.readFileSync(storagePath, 'utf8');
+                            const parsed = JSON.parse(newSessionJson);
+                            if (parsed.cookies && parsed.cookies.length > 0) {
+                                await this.app.secretStorage.setSecret(secretId, newSessionJson.trim());
+                                if (!quiet) new obsidian.Notice("NotebookLM: Session refreshed successfully.");
+                                console.log("[NotebookLM refresh] Success: Session refreshed and saved to keychain.");
+                            }
+                            
+                            // Delete/clean up the file from disk
+                            fs.unlinkSync(storagePath);
+                            resolve(true);
+                        } catch (readErr) {
+                            console.error("[NotebookLM refresh read error]", readErr);
+                            if (fs.existsSync(storagePath)) {
+                                fs.unlinkSync(storagePath);
+                            }
+                            resolve(false);
+                        }
+                    } else {
+                        console.error("[NotebookLM refresh] storage_state.json missing after refresh run");
+                        resolve(false);
+                    }
+                });
+            });
+        } catch (err) {
+            console.error("[NotebookLM refresh error]", err);
+            return false;
         }
     }
 }
@@ -1164,6 +1563,58 @@ class KnowledgePipelineSettingTab extends obsidian.PluginSettingTab {
                         await this.plugin.saveSettings();
                     }));
 
+            containerEl.createEl('h3', { text: '📂 PDF Research Indexing' });
+
+            new obsidian.Setting(containerEl)
+                .setName('PDF Source Folder')
+                .setDesc('Folder path containing research papers and textbooks (e.g. G:/My Drive/Research Papers and Textbooks).')
+                .addText(text => text
+                    .setPlaceholder('G:/My Drive/Research Papers and Textbooks')
+                    .setValue(this.plugin.settings.pdfSourceFolder || '')
+                    .onChange(async (value) => {
+                        this.plugin.settings.pdfSourceFolder = value.trim();
+                        await this.plugin.saveSettings();
+                    }));
+
+            new obsidian.Setting(containerEl)
+                .setName('Output Folder')
+                .setDesc('Folder inside the vault where markdown index notes are created (e.g. 03_Knowledge).')
+                .addText(text => text
+                    .setPlaceholder('03_Knowledge')
+                    .setValue(this.plugin.settings.pdfOutputFolder || '')
+                    .onChange(async (value) => {
+                        this.plugin.settings.pdfOutputFolder = value.trim();
+                        await this.plugin.saveSettings();
+                    }));
+
+            // Mistral API Key
+            const mistralSetting = new obsidian.Setting(containerEl)
+                .setName('Mistral API Key')
+                .setDesc('Secure Mistral API key stored in your system keychain. If empty, falls back to the marker-api plugin configuration.')
+                .addText(text => {
+                    text.inputEl.type = 'password';
+                    text.setPlaceholder('Enter Mistral API Key (Optional)');
+                    let secretId = this.plugin.settings.mistralApiKeyId || 'knowledge-pipeline-mistral-api-key';
+                    this.plugin.settings.mistralApiKeyId = secretId;
+                    this.plugin.saveSettings();
+                    Promise.resolve(this.app.secretStorage.getSecret(secretId)).then(value => {
+                        text.setValue(value || '');
+                    });
+                    text.onChange(async (value) => {
+                        await this.app.secretStorage.setSecret(secretId, value.trim());
+                    });
+                });
+
+            new obsidian.Setting(containerEl)
+                .setName('Process & Index PDFs')
+                .setDesc('Trigger the PDF indexing pipeline. Creates markdown index files with outlines, local file links, and AI summaries.')
+                .addButton(button => button
+                    .setButtonText('Index PDFs')
+                    .setCta()
+                    .onClick(async () => {
+                        await this.plugin.processPDFs();
+                    }));
+
             containerEl.createEl('h3', { text: 'AI Provider Settings' });
 
             // LLM Provider (Dropdown)
@@ -1386,28 +1837,65 @@ class KnowledgePipelineSettingTab extends obsidian.PluginSettingTab {
                 });
             })();
 
+            new obsidian.Setting(containerEl)
+                .setName('NotebookLM Cookie Source')
+                .setDesc('Select whether to use manual Playwright login or extract cookies directly from your local browser.')
+                .addDropdown(dropdown => dropdown
+                    .addOption('manual', 'Manual (Playwright Login Window)')
+                    .addOption('chrome', 'Google Chrome')
+                    .addOption('edge', 'Microsoft Edge')
+                    .addOption('brave', 'Brave Browser')
+                    .addOption('firefox', 'Firefox')
+                    .setValue(this.plugin.settings.notebooklmBrowser || 'manual')
+                    .onChange(async (value) => {
+                        this.plugin.settings.notebooklmBrowser = value;
+                        await this.plugin.saveSettings();
+                        this.display();
+                    }));
+
             // Instructions text block
             const descEl = containerEl.createDiv({ cls: 'setting-item-description' });
-            descEl.innerHTML = `
-                <p>The Knowledge Pipeline uses the local <code>notebooklm</code> CLI to generate mind maps, podcast audio, and cinematic videos.</p>
-                <ol>
-                    <li>Click the <strong>Login & Import</strong> button below. This will launch a separate console window and open a browser.</li>
-                    <li>Complete the Google login in the browser window. Once successful, the session is saved automatically.</li>
-                    <li>Close the command window if it does not close itself.</li>
-                    <li>Obsidian will detect the completion, save the session to the secure keychain, and secure the local file.</li>
-                </ol>
-            `;
+            const selectedBrowser = this.plugin.settings.notebooklmBrowser || 'manual';
+            if (selectedBrowser === 'manual') {
+                descEl.innerHTML = `
+                    <p>The Knowledge Pipeline uses the local <code>notebooklm</code> CLI to generate mind maps, podcast audio, and cinematic videos.</p>
+                    <ol>
+                        <li>Click the <strong>Login & Import</strong> button below. This will launch a separate console window and open a browser.</li>
+                        <li>Complete the Google login in the browser window. Once successful, the session is saved automatically.</li>
+                        <li>Close the command window if it does not close itself.</li>
+                        <li>Obsidian will detect the completion, save the session to the secure keychain, and secure the local file.</li>
+                    </ol>
+                `;
+            } else {
+                const browserLabel = selectedBrowser === 'chrome' ? 'Google Chrome' :
+                                     selectedBrowser === 'edge' ? 'Microsoft Edge' :
+                                     selectedBrowser === 'brave' ? 'Brave Browser' : 'Firefox';
+                descEl.innerHTML = `
+                    <p>The Knowledge Pipeline will extract session cookies directly from your <strong>${browserLabel}</strong> installation.</p>
+                    <ol>
+                        <li>Make sure you are logged into your Google Account in <strong>${browserLabel}</strong>.</li>
+                        <li><strong>Close ${browserLabel} completely</strong> (otherwise, Windows file locks will block cookie reading).</li>
+                        <li>Click the <strong>Import Cookies</strong> button below to instantly authenticate silently.</li>
+                    </ol>
+                `;
+            }
             descEl.style.cssText = 'margin-bottom: 1.5em; line-height: 1.4;';
 
             // Button Setting: Login and Import CLI Credentials to Keychain
+            const isManual = selectedBrowser === 'manual';
             new obsidian.Setting(containerEl)
-                .setName('Login and Import Credentials')
-                .setDesc('Launches the NotebookLM login process, opens a browser for authentication, then saves the session to Obsidian\'s secure keychain.')
+                .setName(isManual ? 'Login and Import Credentials' : 'Import Browser Cookies')
+                .setDesc(isManual ? 'Launches the NotebookLM login process, opens a browser for authentication, then saves the session to Obsidian\'s secure keychain.'
+                                  : `Extracts cookies from ${selectedBrowser} silently and saves them to Obsidian's secure keychain.`)
                 .addButton(button => button
-                    .setButtonText('Login & Import')
+                    .setButtonText(isManual ? 'Login & Import' : 'Import Cookies')
                     .setCta()
                     .onClick(async () => {
-                        await this.plugin.launchLogin();
+                        if (isManual) {
+                            await this.plugin.launchLogin();
+                        } else {
+                            await this.plugin.launchSilentBrowserAuth(selectedBrowser);
+                        }
                     }));
 
             // Button Setting: Test CLI Connection
@@ -1433,8 +1921,9 @@ class KnowledgePipelineSettingTab extends obsidian.PluginSettingTab {
                                 NOTEBOOKLM_AUTH_JSON: sessionJson
                             });
 
-                            // Execute notebooklm list
-                            child_process.exec('notebooklm list --json', { env: env, timeout: 10000 }, (err, stdout, stderr) => {
+                             // Execute notebooklm list
+                             const notebooklmCmd = this.plugin.getNotebooklmCmd();
+                             child_process.exec(`"${notebooklmCmd}" list --json`, { env: env, timeout: 10000 }, (err, stdout, stderr) => {
                                 const output = (stdout || '') + (stderr || '');
                                 console.log("[NotebookLM test]", output);
                                 if (err || output.toLowerCase().includes('not logged in') || output.toLowerCase().includes('expired')) {
@@ -1515,7 +2004,8 @@ class KnowledgePipelineSettingTab extends obsidian.PluginSettingTab {
                                 NOTEBOOKLM_AUTH_JSON: sessionJson
                             });
 
-                            child_process.exec(`python -u "${scriptPath}"`, { env: env, timeout: 60000 }, async (err, stdout, stderr) => {
+                             const pythonCmd = this.getPythonCmd();
+                             child_process.exec(`"${pythonCmd}" -u "${scriptPath}"`, { env: env, timeout: 60000 }, async (err, stdout, stderr) => {
                                 if (err) {
                                     loadingNotice.hide();
                                     console.error("Cleanup scan failed:", stderr || stdout);

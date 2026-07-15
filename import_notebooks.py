@@ -6,6 +6,13 @@ import difflib
 import subprocess
 
 def run_cli_cmd(args):
+    # Resolve absolute path to notebooklm.exe inside virtual environment
+    if isinstance(args, str) and args.startswith("notebooklm "):
+        venv_dir = os.path.dirname(sys.executable)
+        notebooklm_bin = os.path.join(venv_dir, "notebooklm.exe" if os.name == "nt" else "notebooklm")
+        if os.path.exists(notebooklm_bin):
+            args = args.replace("notebooklm ", f'"{notebooklm_bin}" ', 1)
+
     try:
         res = subprocess.run(
             args,
