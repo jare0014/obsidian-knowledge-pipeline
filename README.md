@@ -18,3 +18,9 @@ No plaintext API keys or OAuth tokens are saved on disk. The plugin retrieves ke
 ## 🙏 Acknowledgments
 
 * **notebooklm-py**: Integrates the unofficial [notebooklm-py](https://github.com/gitbuda/notebooklm-py) client to enable automated document uploads and Google Notebook creation directly from the Obsidian pipeline.
+
+## 📻 Integrated Podcast Server
+
+The plugin features an integrated, lightweight podcast server (`podcast_server.py`) that runs locally and hosts generated NotebookLM audio podcasts. It is dynamically served directly inside your vault.
+* **Auto-Discovery Port**: The server automatically reads its port configuration from the plugin settings page (default: `8085`).
+* **Tailscale Ready**: Stream your podcasts on the go by connecting your mobile device over Tailscale and pointing your media player hub to the host IP.

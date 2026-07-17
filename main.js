@@ -10,7 +10,8 @@ const DEFAULT_SETTINGS = {
     pdfSourceFolder: 'G:/My Drive/Research Papers and Textbooks',
     pdfOutputFolder: '03_Knowledge',
     mistralApiKeyId: 'knowledge-pipeline-mistral-api-key',
-    notebooklmBrowser: 'manual'
+    notebooklmBrowser: 'manual',
+    podcastServerPort: 8085
 };
 
 class KnowledgePipelinePlugin extends obsidian.Plugin {
@@ -1803,6 +1804,22 @@ class KnowledgePipelineSettingTab extends obsidian.PluginSettingTab {
                             await this.plugin.saveSettings();
                         }));
             }
+
+            containerEl.createEl('h3', { text: 'Podcast Server Settings' });
+
+            new obsidian.Setting(containerEl)
+                .setName('Podcast Server Port')
+                .setDesc('Port for the local NotebookLM Podcast Server (default: 8085).')
+                .addText(text => text
+                    .setPlaceholder('8085')
+                    .setValue((this.plugin.settings.podcastServerPort || 8085).toString())
+                    .onChange(async (value) => {
+                        const port = parseInt(value.trim(), 10);
+                        if (!isNaN(port) && port > 0 && port < 65536) {
+                            this.plugin.settings.podcastServerPort = port;
+                            await this.plugin.saveSettings();
+                        }
+                    }));
 
             const notebookHeader = containerEl.createEl('h3', { text: 'NotebookLM CLI Authentication' });
             const notebookBadge = containerEl.createEl('span');
