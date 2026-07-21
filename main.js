@@ -37,8 +37,53 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
         return 'notebooklm';
     }
 
+    onunload() {
+        if (this.podcastServerProcess) {
+            console.log("[Knowledge Pipeline] Stopping Podcast Server...");
+            this.podcastServerProcess.kill();
+        }
+    }
+
+    startPodcastServer() {
+        try {
+            const child_process = require('child_process');
+            const path = require('path');
+            const fs = require('fs');
+
+            const vaultPath = this.app.vault.adapter.getBasePath();
+            const scriptPath = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline', 'podcast_server.py');
+
+            if (!fs.existsSync(scriptPath)) {
+                console.error("[Knowledge Pipeline] Podcast server script not found at", scriptPath);
+                return;
+            }
+
+            const pythonCmd = this.getPythonCmd();
+            
+            console.log("[Knowledge Pipeline] Starting Podcast Server...");
+            
+            this.podcastServerProcess = child_process.spawn(pythonCmd, [scriptPath], {
+                cwd: path.dirname(scriptPath),
+                detached: true,
+                stdio: 'ignore'
+            });
+            
+            this.podcastServerProcess.on('error', (err) => {
+                console.error("[Knowledge Pipeline] Podcast server failed to start:", err);
+            });
+            
+            this.podcastServerProcess.unref();
+            console.log("[Knowledge Pipeline] Podcast Server started in background.");
+        } catch (e) {
+            console.error("[Knowledge Pipeline] Failed to launch Podcast Server:", e);
+        }
+    }
+
     async onload() {
         await this.loadSettings();
+
+        // Start background Podcast Server
+        this.startPodcastServer();
 
         // Add settings tab
         this.addSettingTab(new KnowledgePipelineSettingTab(this.app, this));
