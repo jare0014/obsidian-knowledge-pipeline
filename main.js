@@ -53,8 +53,17 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             const vaultPath = this.app.vault.adapter.getBasePath();
             const scriptPath = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline', 'podcast_server.py');
 
-            if (!fs.existsSync(scriptPath)) {
-                console.error("[Knowledge Pipeline] Podcast server script not found at", scriptPath);
+            const vbsPath = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline', 'run_hidden.vbs');
+            if (fs.existsSync(vbsPath)) {
+                console.log("[Knowledge Pipeline] Starting Podcast Server silently via VBScript...");
+                this.podcastServerProcess = child_process.spawn('wscript.exe', [vbsPath], {
+                    cwd: path.dirname(vbsPath),
+                    detached: true,
+                    windowsHide: true,
+                    stdio: 'ignore'
+                });
+                this.podcastServerProcess.unref();
+                console.log("[Knowledge Pipeline] Podcast Server started in background.");
                 return;
             }
 
@@ -65,6 +74,7 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             this.podcastServerProcess = child_process.spawn(pythonCmd, [scriptPath], {
                 cwd: path.dirname(scriptPath),
                 detached: true,
+                windowsHide: true,
                 stdio: 'ignore'
             });
             
