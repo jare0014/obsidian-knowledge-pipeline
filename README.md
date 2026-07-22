@@ -1,6 +1,25 @@
-# Obsidian Knowledge Pipeline Plugin
+An automated ingestion pipeline for Obsidian that scrapes web links, generates high-quality AI summaries, structures research stubs, and builds interactive NotebookLM mind maps and podcast feeds.
 
-An automated ingestion pipeline for Obsidian that scrapes web links, generates high-quality AI summaries, structures research stubs, and builds interactive NotebookLM mind maps.
+---
+
+## 🏗️ Architecture
+
+```mermaid
+graph TD
+    WebLink["🔗 Web Article / PDF URL"] --> Scraper["BeautifulSoup & PyMuPDF Ingestion Engine"]
+    Scraper --> MathBridge["Unicode Math & LaTeX Compiler"]
+    
+    MathBridge --> Summarizer["🤖 LLM Engine (Gemini 3.1 Flash-Lite / Ollama)"]
+    Summarizer --> ObsidianNote["📝 Formatted Obsidian Knowledge Note"]
+    
+    ObsidianNote --> NotebookLM["📓 NotebookLM API Bridge (notebooklm-py)"]
+    NotebookLM --> AudioGen["🎙️ NotebookLM Audio Podcast Generation"]
+    
+    AudioGen --> PodcastServer["📻 Vault Podcast Server (podcast_server.py :8085)"]
+    PodcastServer --> MobileFeed["📱 Mobile Streaming via Tailscale VPN"]
+```
+
+---
 
 ## 🛠️ Core Features
 
