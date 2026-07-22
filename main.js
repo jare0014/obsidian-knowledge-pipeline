@@ -1020,7 +1020,6 @@ actions:
         };
 
         // Periodic keepalive / refresh session
-        const now = Date.now();
         if (!this.lastRefreshTime || (now - this.lastRefreshTime > 15 * 60 * 1000)) {
             this.lastRefreshTime = now;
             // Run silent background refresh
@@ -1038,6 +1037,11 @@ actions:
                 this.statusBarItemEl.style.cursor = "pointer";
                 return;
             }
+
+            // Set neutral status while checking
+            this.statusBarItemEl.setText("⏳ NotebookLM: Checking...");
+            this.statusBarItemEl.title = "Verifying session credentials...";
+            this.statusBarItemEl.style.color = "var(--text-muted)";
 
             const child_process = require('child_process');
             const env = Object.assign({}, process.env, {
