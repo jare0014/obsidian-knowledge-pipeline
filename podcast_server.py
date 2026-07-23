@@ -11,7 +11,16 @@ import email.utils
 
 # Default Paths (relative to the Obsidian vault root)
 PORT = 8085
-VAULT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+def find_vault_root(start_path):
+    curr = os.path.abspath(start_path)
+    while curr and os.path.dirname(curr) != curr:
+        if os.path.basename(curr) != ".obsidian" and os.path.exists(os.path.join(curr, ".obsidian")):
+            return curr
+        curr = os.path.dirname(curr)
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+VAULT_DIR = find_vault_root(__file__)
 
 # Attempt to load port from plugin settings
 plugin_data_path = os.path.join(VAULT_DIR, ".obsidian", "plugins", "knowledge-pipeline", "data.json")

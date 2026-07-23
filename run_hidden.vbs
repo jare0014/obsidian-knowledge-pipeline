@@ -3,7 +3,7 @@ Dim fso, scriptDir, pythonExe, scriptPath
 Set fso = CreateObject("Scripting.FileSystemObject")
 
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
-pythonExe = scriptDir & "\.venv\Scripts\python.exe"
+pythonExe = scriptDir & "\.venv\Scripts\pythonw.exe"
 scriptPath = scriptDir & "\podcast_server.py"
 
 WshShell.CurrentDirectory = scriptDir
