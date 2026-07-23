@@ -109,91 +109,105 @@ def scan_notes_metadata(vault_path):
     return embed_map, basename_map
 
 def get_podcast_list():
-    """Scan attachments for *Podcast.mp3 files and match metadata from markdown notes."""
+    """Scan vault directories for audio files (.mp3, .m4a, .wav, .ogg, .flac) and match metadata from markdown notes."""
     embed_map, basename_map = scan_notes_metadata(VAULT_DIR)
     podcasts = []
     
-    if not os.path.exists(ATTACHMENTS_DIR):
-        return podcasts
+    AUDIO_EXTENSIONS = ('.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac')
+    seen_files = set()
+
+    for root, dirs, files in os.walk(VAULT_DIR):
+        # Skip hidden or system directories to improve speed
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("venv", ".venv", "node_modules", ".trash", "04_Projects")]
         
-    for item in os.listdir(ATTACHMENTS_DIR):
-        if not item.endswith("Podcast.mp3") and not (item.endswith(".mp3") and "podcast" in item.lower()):
-            continue
+        for item in files:
+            if not item.lower().endswith(AUDIO_EXTENSIONS):
+                continue
+                
+            file_path = os.path.join(root, item)
+            if not os.path.isfile(file_path) or file_path in seen_files:
+                continue
+            seen_files.add(file_path)
+                
+            # Get basic file details
+            stat = os.stat(file_path)
+            size = stat.st_size
+            mtime = stat.st_mtime
             
-        file_path = os.path.join(ATTACHMENTS_DIR, item)
-        if not os.path.isfile(file_path):
-            continue
+            # Clean title from filename
+            clean_base = re.sub(r'Podcast(\s*\(\d+\))?\.mp3$', '', item, flags=re.IGNORECASE).strip()
+            clean_base = re.sub(r'\.(mp3|m4a|wav|ogg|flac|aac)$', '', clean_base, flags=re.IGNORECASE).strip()
+            clean_base = re.sub(r'\s*\(\d+\)$', '', clean_base).strip()
             
-        # Get basic file details
-        stat = os.stat(file_path)
-        size = stat.st_size
-        mtime = stat.st_mtime
-        
-        # Clean title from filename
-        # e.g., "Universal Cell Embedding ... Podcast.mp3" -> "Universal Cell Embedding ..."
-        clean_base = re.sub(r'Podcast(\s*\(\d+\))?\.mp3$', '', item, flags=re.IGNORECASE).strip()
-        clean_base = re.sub(r'\s*\(\d+\)$', '', clean_base).strip()
-        
-        # Attempt matching to note metadata
-        matched_note = None
-        
-        # 1. Match by exact attachment filename embed
-        if item in embed_map:
-            matched_note = embed_map[item]
-        elif clean_base in embed_map:
-            matched_note = embed_map[clean_base]
+            # Attempt matching to note metadata
+            matched_note = None
             
-        # 2. Match by normalized name
-        if not matched_note:
-            norm_clean = normalize_name(clean_base)
-            if norm_clean in basename_map:
-                matched_note = basename_map[norm_clean]
-            else:
-                # Substring matching
-                for norm_title, info in basename_map.items():
-                    if len(norm_title) >= 12 and (norm_title in norm_clean or norm_clean in norm_title):
-                        matched_note = info
-                        break
-                        
-        # 3. Match by domain words (e.g. Source MIT News https...)
-        if not matched_note:
-            domain_match = re.search(r'Source\s+(.*?)\s+https', clean_base, re.IGNORECASE)
-            if domain_match:
-                domain_str = domain_match.group(1)
-                words = [w.lower() for w in re.sub(r'[^a-zA-Z0-9\s]', '', domain_str).split() if len(w) > 2]
-                if words:
+            # 1. Match by exact attachment filename embed
+            if item in embed_map:
+                matched_note = embed_map[item]
+            elif clean_base in embed_map:
+                matched_note = embed_map[clean_base]
+                
+            # 2. Match by normalized name
+            if not matched_note:
+                norm_clean = normalize_name(clean_base)
+                if norm_clean in basename_map:
+                    matched_note = basename_map[norm_clean]
+                else:
+                    # Substring matching
                     for norm_title, info in basename_map.items():
-                        note_url = info['url'].lower()
-                        note_title_lower = info['title'].lower()
-                        if any(word in note_url or word in note_title_lower for word in words):
+                        if len(norm_title) >= 10 and (norm_title in norm_clean or norm_clean in norm_title):
                             matched_note = info
                             break
                             
-        # Consolidate attributes
-        if matched_note:
-            title = matched_note['title']
-            summary = matched_note['summary']
-            topic = matched_note['topic']
-            category = matched_note['category']
-            url = matched_note['url']
-        else:
-            title = clean_base
-            summary = "No Obsidian notes matched. Served from attachments queue."
-            topic = "Uncategorized"
-            category = "archive"
-            url = ""
+            # 3. Match by domain words (e.g. Source MIT News https...)
+            if not matched_note:
+                domain_match = re.search(r'Source\s+(.*?)\s+https', clean_base, re.IGNORECASE)
+                if domain_match:
+                    domain_str = domain_match.group(1)
+                    words = [w.lower() for w in re.sub(r'[^a-zA-Z0-9\s]', '', domain_str).split() if len(w) > 2]
+                    if words:
+                        for norm_title, info in basename_map.items():
+                            note_url = info['url'].lower()
+                            note_title_lower = info['title'].lower()
+                            if any(word in note_url or word in note_title_lower for word in words):
+                                matched_note = info
+                                break
+                                
+            # Consolidate attributes
+            if matched_note:
+                title = matched_note['title']
+                summary = matched_note['summary']
+                topic = matched_note['topic']
+                category = matched_note['category']
+                url = matched_note['url']
+            else:
+                title = clean_base if clean_base else item
+                summary = "Audio asset in vault."
+                topic = "General"
+                rel_p = os.path.relpath(file_path, VAULT_DIR).replace("\\", "/")
+                if rel_p.startswith("00_Imports/") or rel_p.startswith("01_Inbox/"):
+                    category = "imports"
+                elif rel_p.startswith("01_Incubator/"):
+                    category = "incubator"
+                elif rel_p.startswith("03_Knowledge/"):
+                    category = "knowledge"
+                else:
+                    category = "archive"
+                url = ""
+                
+            podcasts.append({
+                'filename': item,
+                'rel_path': os.path.relpath(file_path, VAULT_DIR).replace("\\", "/"),
+                'title': title,
+                'summary': summary,
+                'topic': topic,
+                'category': category,
+                'url': url,
+                'size': size,
+                'mtime': mtime
+            })
             
-        podcasts.append({
-            'filename': item,
-            'title': title,
-            'summary': summary,
-            'topic': topic,
-            'category': category,
-            'url': url,
-            'size': size,
-            'mtime': mtime
-        })
-        
     # Sort by modification time desc (newest first)
     podcasts.sort(key=lambda x: x['mtime'], reverse=True)
     return podcasts
@@ -233,6 +247,13 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
         if path.startswith('/audio/'):
             filename = urllib.parse.unquote(path[7:])
             filepath = os.path.join(ATTACHMENTS_DIR, filename)
+            if not os.path.exists(filepath):
+                filepath = os.path.join(VAULT_DIR, filename)
+            if not os.path.exists(filepath):
+                for root, _, files in os.walk(VAULT_DIR):
+                    if filename in files:
+                        filepath = os.path.join(root, filename)
+                        break
             if not os.path.exists(filepath) or not os.path.isfile(filepath):
                 self.send_error(404, "File Not Found")
                 return
