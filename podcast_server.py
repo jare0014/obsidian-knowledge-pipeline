@@ -223,6 +223,7 @@ def get_podcast_list():
                                 matched_note = info
                                 break
                                 
+            matched_note_titles = set()
             # Consolidate attributes
             if matched_note:
                 title = matched_note['title']
@@ -231,13 +232,16 @@ def get_podcast_list():
                 category = matched_note['category']
                 url = matched_note['url']
                 notebook_id = matched_note['notebook_id']
+                matched_note_titles.add(matched_note['title'])
             else:
                 title = clean_base if clean_base else item
                 summary = "Audio asset in vault."
                 topic = "General"
                 rel_p = os.path.relpath(file_path, VAULT_DIR).replace("\\", "/")
-                if rel_p.startswith("00_Imports/") or rel_p.startswith("01_Inbox/"):
+                if rel_p.startswith("00_Imports/"):
                     category = "imports"
+                elif rel_p.startswith("01_Inbox/"):
+                    category = "inbox"
                 elif rel_p.startswith("01_Incubator/"):
                     category = "incubator"
                 elif rel_p.startswith("03_Knowledge/"):
@@ -257,6 +261,23 @@ def get_podcast_list():
                 'url': url,
                 'notebook_id': notebook_id,
                 'size': size,
+                'mtime': mtime
+            })
+
+    # Include non-audio notes from stage folders so Imports/Inbox/Incubator/Knowledge tabs show all items
+    for norm_title, info in basename_map.items():
+        if info['title'] not in matched_note_titles:
+            mtime = os.path.getmtime(info['path']) if os.path.exists(info['path']) else 0
+            podcasts.append({
+                'filename': '',
+                'rel_path': info['rel_path'],
+                'title': info['title'],
+                'summary': info['summary'],
+                'topic': info['topic'],
+                'category': info['category'],
+                'url': info['url'],
+                'notebook_id': info['notebook_id'],
+                'size': 0,
                 'mtime': mtime
             })
             
@@ -351,6 +372,88 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             return
             
         self.send_error(404, "Not Found")
+
+    def _send_json(self, data, status=200):
+        body_bytes = json.dumps(data).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body_bytes)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(body_bytes)
+
+    def do_POST(self):
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path
+        
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else "{}"
+        try:
+            body = json.loads(post_data)
+        except Exception:
+            body = {}
+            
+        if path == '/api/add_note':
+            note_rel_path = body.get('note_path', '')
+            note_text = body.get('text', '')
+            if not note_rel_path or not note_text:
+                self._send_json({'error': 'Missing note_path or text'}, status=400)
+                return
+                
+            full_path = os.path.join(VAULT_DIR, note_rel_path) if not os.path.isabs(note_rel_path) else note_rel_path
+            if os.path.exists(full_path):
+                date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                append_block = f"\n\n### 📝 Note Added ({date_str})\n{note_text}\n"
+                with open(full_path, "a", encoding="utf-8") as f:
+                    f.write(append_block)
+                self._send_json({'success': True, 'message': f'Appended note to {os.path.basename(full_path)}'})
+            else:
+                self._send_json({'error': 'Note file not found'}, status=404)
+            return
+
+        if path == '/api/move_note':
+            note_rel_path = body.get('note_path', '')
+            dest_stage = body.get('destination', '') # 'inbox', 'incubator', 'knowledge'
+            if not note_rel_path or not dest_stage:
+                self._send_json({'error': 'Missing note_path or destination'}, status=400)
+                return
+                
+            src_full = os.path.join(VAULT_DIR, note_rel_path) if not os.path.isabs(note_rel_path) else note_rel_path
+            if not os.path.exists(src_full):
+                self._send_json({'error': 'Source file not found'}, status=404)
+                return
+                
+            folder_map = {
+                'inbox': '01_Inbox',
+                'incubator': '01_Incubator',
+                'knowledge': '03_Knowledge'
+            }
+            dest_folder_name = folder_map.get(dest_stage, '01_Inbox')
+            dest_dir = os.path.join(VAULT_DIR, dest_folder_name)
+            if not os.path.exists(dest_dir):
+                os.makedirs(dest_dir)
+                
+            dest_full = os.path.join(dest_dir, os.path.basename(src_full))
+            shutil.move(src_full, dest_full)
+            new_rel_path = os.path.relpath(dest_full, VAULT_DIR).replace("\\", "/")
+            
+            # If moved to Inbox -> trigger Podcast & MindMap generation if missing
+            if dest_stage == 'inbox':
+                python_bin = sys.executable
+                script_path = os.path.join(os.path.dirname(__file__), 'generate_artifact.py')
+                subprocess.Popen([python_bin, script_path, dest_full, 'audio'], shell=False)
+                subprocess.Popen([python_bin, script_path, dest_full, 'mind-map'], shell=False)
+
+            # If moved to Knowledge -> trigger Quiz generation if missing
+            if dest_stage == 'knowledge':
+                python_bin = sys.executable
+                script_path = os.path.join(os.path.dirname(__file__), 'generate_artifact.py')
+                subprocess.Popen([python_bin, script_path, dest_full, 'quiz'], shell=False)
+
+            self._send_json({'success': True, 'new_path': new_rel_path, 'message': f'Moved note to {dest_folder_name}'})
+            return
+            
+        self._send_json({'error': 'Not found'}, status=404)
 
     def serve_audio_file(self, filepath):
         file_size = os.path.getsize(filepath)
@@ -1390,10 +1493,11 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
 
             <div class="tabs-container" id="filter-tabs">
                 <button class="tab-btn active" data-filter="all">All Episodes</button>
-                <button class="tab-btn" data-filter="imports">Imports</button>
-                <button class="tab-btn" data-filter="incubator">Incubator</button>
-                <button class="tab-btn" data-filter="knowledge">Knowledge</button>
-                <button class="tab-btn" data-filter="archive">Archive</button>
+                <button class="tab-btn" data-filter="imports">📥 Imports</button>
+                <button class="tab-btn" data-filter="inbox">📥 Inbox</button>
+                <button class="tab-btn" data-filter="incubator">❔ Incubator</button>
+                <button class="tab-btn" data-filter="knowledge">🎓 Knowledge</button>
+                <button class="tab-btn" data-filter="archive">📦 Archive</button>
             </div>
         </div>
     </header>
@@ -1580,17 +1684,31 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                                 <span>${fileDate}</span>
                                 <span>${sizeMb} MB</span>
                             </div>
-                            <div style="display: flex; gap: 8px; align-items: center;">
-                                <button class="quiz-card-btn" onclick="openQuizModal('${p.filename}', '${p.notebook_id || ''}', '${p.rel_path}')" title="NotebookLM Quiz">
-                                    🧠 Quiz
-                                </button>
-                                <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
-                                    ${playBtnState === 'play' ? `
-                                        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                                    ` : `
-                                        <svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                                    `}
-                                </button>
+                            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                                ${p.category === 'imports' ? `
+                                    <button class="action-btn promote-btn" onclick="moveNote('${p.rel_path}', 'inbox')" title="Promote to Inbox">➡️ Promote to Inbox</button>
+                                ` : p.category === 'inbox' ? `
+                                    <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
+                                        ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
+                                    </button>
+                                    <button class="action-btn note-btn" onclick="promptAddNote('${p.rel_path}')" title="Add Note to File">📝 Add Note</button>
+                                    <button class="action-btn promote-btn" onclick="moveNote('${p.rel_path}', 'knowledge')" title="Promote to Knowledge">🎓 Promote to Knowledge</button>
+                                    <button class="action-btn demote-btn" onclick="moveNote('${p.rel_path}', 'incubator')" title="Demote to Incubator">❔ Demote to Incubator</button>
+                                ` : p.category === 'knowledge' ? `
+                                    <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
+                                        ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
+                                    </button>
+                                    <button class="action-btn note-btn" onclick="promptAddNote('${p.rel_path}')" title="Add Note to File">📝 Add Note</button>
+                                    <button class="quiz-card-btn" onclick="openQuizModal('${p.filename}', '${p.notebook_id || ''}', '${p.rel_path}')" title="NotebookLM Quiz">🧩 Quiz</button>
+                                    <button class="action-btn demote-btn" onclick="moveNote('${p.rel_path}', 'inbox')" title="Demote to Inbox">📥 Demote to Inbox</button>
+                                ` : p.category === 'incubator' ? `
+                                    <button class="action-btn promote-btn" onclick="moveNote('${p.rel_path}', 'inbox')" title="Move to Inbox">📥 Move to Inbox</button>
+                                    <button class="action-btn promote-btn" onclick="moveNote('${p.rel_path}', 'knowledge')" title="Promote to Knowledge">🎓 Promote to Knowledge</button>
+                                ` : `
+                                    <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
+                                        ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
+                                    </button>
+                                `}
                             </div>
                         </div>
                     </div>
@@ -1609,6 +1727,49 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             } else {
                 el.classList.add('expanded');
                 btn.textContent = 'Read Less';
+            }
+        };
+
+        // Move Note Stage API Handler
+        window.moveNote = async function(relPath, destStage) {
+            try {
+                const res = await fetch('/api/move_note', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ note_path: relPath, destination: destStage })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert(data.message);
+                    const freshRes = await fetch('/api/podcasts');
+                    allPodcasts = await freshRes.json();
+                    renderPodcasts();
+                } else {
+                    alert('Error moving note: ' + (data.error || 'Failed'));
+                }
+            } catch(e) {
+                alert('Move failed: ' + e.message);
+            }
+        };
+
+        // Add Note Text API Handler
+        window.promptAddNote = async function(relPath) {
+            const noteText = prompt("Enter note to append to markdown file:");
+            if (!noteText || !noteText.trim()) return;
+            try {
+                const res = await fetch('/api/add_note', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ note_path: relPath, text: noteText.trim() })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert('Note appended successfully to note file!');
+                } else {
+                    alert('Error adding note: ' + (data.error || 'Failed'));
+                }
+            } catch(e) {
+                alert('Add note failed: ' + e.message);
             }
         };
 

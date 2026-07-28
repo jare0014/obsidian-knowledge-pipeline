@@ -248,93 +248,217 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             // Fetch podcast catalog from Server
             fetch(`${baseUrl}/api/podcasts`)
                 .then(res => res.json())
-                .then(data => {
-                    const podcasts = data.podcasts || [];
-                    if (podcasts.length === 0) {
+                .then(podcasts => {
+                    if (!Array.isArray(podcasts) || podcasts.length === 0) {
                         wrapper.createEl('p', { text: 'No audio podcasts found in vault.', style: 'color: var(--text-muted);' });
                         return;
                     }
                     
-                    const tableContainer = wrapper.createDiv({ style: 'overflow-x: auto;' });
-                    const table = tableContainer.createEl('table');
-                    table.style.width = '100%';
-                    table.style.borderCollapse = 'collapse';
-                    
-                    const thead = table.createEl('thead');
-                    const hRow = thead.createEl('tr');
-                    ['Track', 'Stage', 'Actions'].forEach(h => {
-                        const th = hRow.createEl('th', { text: h });
-                        th.style.textAlign = 'left';
-                        th.style.padding = '8px';
-                        th.style.borderBottom = '2px solid var(--background-modifier-border)';
-                    });
-                    
-                    const tbody = table.createEl('tbody');
-                    podcasts.forEach(pod => {
-                        const tr = tbody.createEl('tr');
-                        tr.style.borderBottom = '1px solid var(--background-modifier-border)';
+                    let activeTab = 'all';
+                    const tabsContainer = wrapper.createDiv({ style: 'display: flex; gap: 8px; margin-bottom: 15px; flex-wrap: wrap;' });
+                    const renderList = () => {
+                        const existingTable = wrapper.querySelector('.podcast-table-container');
+                        if (existingTable) existingTable.remove();
                         
-                        const tdName = tr.createEl('td', { text: pod.title || pod.filename, style: 'padding: 8px; font-weight: 500;' });
-                        const tdCategory = tr.createEl('td', { text: (pod.category || 'general').toUpperCase(), style: 'padding: 8px; color: var(--text-muted); font-size: 0.85em;' });
+                        const filtered = podcasts.filter(p => {
+                            if (activeTab === 'all') return true;
+                            return (p.category || 'general').toLowerCase() === activeTab;
+                        });
                         
-                        const tdAction = tr.createEl('td', { style: 'padding: 8px; display: flex; gap: 6px;' });
-                        const playBtn = tdAction.createEl('button', { text: '▶️ Play' });
-                        playBtn.onclick = () => {
-                            window.activePodcastTitle = pod.title || pod.filename;
-                            titleEl.textContent = `🔊 Playing: ${window.activePodcastTitle}`;
-                            window.podcastAudio.src = pod.url.startsWith('http') ? pod.url : `${baseUrl}${pod.url}`;
-                            window.podcastAudio.play();
-                        };
+                        const tableContainer = wrapper.createDiv({ cls: 'podcast-table-container', style: 'overflow-x: auto;' });
+                        const table = tableContainer.createEl('table');
+                        table.style.width = '100%';
+                        table.style.borderCollapse = 'collapse';
                         
-                        // Quiz button ONLY appears for Knowledge category notes
-                        if (pod.category === 'knowledge') {
-                            const quizBtn = tdAction.createEl('button', { text: '🧩 Quiz' });
-                            quizBtn.onclick = async () => {
-                                try {
-                                    const qRes = await fetch(`${baseUrl}/api/quiz?notebook_id=${pod.notebook_id || ''}&note_path=${encodeURIComponent(pod.rel_path || '')}`);
-                                    const qData = await qRes.json();
-                                    
-                                    if (qData.exists === false) {
-                                        const modal = document.createElement("div");
-                                        modal.style.position = "fixed";
-                                        modal.style.top = "50%";
-                                        modal.style.left = "50%";
-                                        modal.style.transform = "translate(-50%, -50%)";
-                                        modal.style.background = "var(--background-primary)";
-                                        modal.style.border = "1px solid var(--border-color)";
-                                        modal.style.borderRadius = "12px";
-                                        modal.style.padding = "24px";
-                                        modal.style.zIndex = "10000";
-                                        modal.style.boxShadow = "0 10px 30px rgba(0,0,0,0.4)";
-                                        modal.style.maxWidth = "450px";
-                                        
-                                        modal.innerHTML = `
-                                            <h3 style="margin-top:0;">🧩 NotebookLM Quiz</h3>
-                                            <p style="color: var(--text-muted);">${qData.message || 'Quiz artifact not yet generated.'}</p>
-                                            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
-                                                <button id="close-quiz-modal" style="padding: 6px 12px;">Close</button>
-                                                <button id="gen-quiz-btn" style="padding: 6px 16px; background: var(--interactive-accent); color: var(--text-on-accent); font-weight: bold;">⚡ Generate Quiz</button>
-                                            </div>
-                                        `;
-                                        document.body.appendChild(modal);
-                                        
-                                        modal.querySelector("#close-quiz-modal").onclick = () => modal.remove();
-                                        modal.querySelector("#gen-quiz-btn").onclick = async () => {
-                                            modal.querySelector("#gen-quiz-btn").disabled = true;
-                                            modal.querySelector("#gen-quiz-btn").textContent = "⏳ Generating...";
-                                            new obsidian.Notice(`Generating NotebookLM Quiz for ${pod.title}...`);
-                                            this.runArtifactGeneratorForFile(pod.rel_path, 'quiz');
-                                            modal.remove();
-                                        };
-                                    } else {
-                                        new obsidian.Notice(`Loaded Quiz: ${qData.title || pod.title}`);
-                                    }
-                                } catch (e) {
-                                    new obsidian.Notice(`Error loading quiz: ${e.message}`);
+                        const thead = table.createEl('thead');
+                        const hRow = thead.createEl('tr');
+                        ['Track', 'Stage', 'Actions'].forEach(h => {
+                            const th = hRow.createEl('th', { text: h });
+                            th.style.textAlign = 'left';
+                            th.style.padding = '8px';
+                            th.style.borderBottom = '2px solid var(--background-modifier-border)';
+                        });
+                        
+                        const tbody = table.createEl('tbody');
+                        filtered.forEach(pod => {
+                            const tr = tbody.createEl('tr');
+                            tr.style.borderBottom = '1px solid var(--background-modifier-border)';
+                            
+                            const tdName = tr.createEl('td', { text: pod.title || pod.filename, style: 'padding: 8px; font-weight: 500;' });
+                            const tdCategory = tr.createEl('td', { text: (pod.category || 'general').toUpperCase(), style: 'padding: 8px; color: var(--text-muted); font-size: 0.85em;' });
+                            
+                            const tdAction = tr.createEl('td', { style: 'padding: 8px; display: flex; gap: 6px; flex-wrap: wrap;' });
+                            
+                            const cat = (pod.category || '').toLowerCase();
+                            
+                            if (cat === 'imports') {
+                                const btnPromote = tdAction.createEl('button', { text: '➡️ Promote to Inbox' });
+                                btnPromote.onclick = async () => {
+                                    btnPromote.disabled = true;
+                                    await fetch(`${baseUrl}/api/move_note`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ note_path: pod.rel_path, destination: 'inbox' })
+                                    });
+                                    new obsidian.Notice(`Promoted ${pod.title} to Inbox!`);
+                                };
+                            } else if (cat === 'inbox') {
+                                if (pod.filename) {
+                                    const playBtn = tdAction.createEl('button', { text: '▶️ Play' });
+                                    playBtn.onclick = () => {
+                                        window.activePodcastTitle = pod.title || pod.filename;
+                                        titleEl.textContent = `🔊 Playing: ${window.activePodcastTitle}`;
+                                        window.podcastAudio.src = pod.url.startsWith('http') ? pod.url : `${baseUrl}${pod.url}`;
+                                        window.podcastAudio.play();
+                                    };
                                 }
-                            };
-                        }
+                                const btnAddNote = tdAction.createEl('button', { text: '📝 Add Note' });
+                                btnAddNote.onclick = async () => {
+                                    const noteTxt = prompt("Enter note to append to markdown file:");
+                                    if (noteTxt && noteTxt.trim()) {
+                                        await fetch(`${baseUrl}/api/add_note`, {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ note_path: pod.rel_path, text: noteTxt.trim() })
+                                        });
+                                        new obsidian.Notice(`Note added to ${pod.title}!`);
+                                    }
+                                };
+                                const btnPromote = tdAction.createEl('button', { text: '🎓 Promote to Knowledge' });
+                                btnPromote.onclick = async () => {
+                                    btnPromote.disabled = true;
+                                    await fetch(`${baseUrl}/api/move_note`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ note_path: pod.rel_path, destination: 'knowledge' })
+                                    });
+                                    new obsidian.Notice(`Promoted ${pod.title} to Knowledge!`);
+                                };
+                                const btnDemote = tdAction.createEl('button', { text: '❔ Demote to Incubator' });
+                                btnDemote.onclick = async () => {
+                                    btnDemote.disabled = true;
+                                    await fetch(`${baseUrl}/api/move_note`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ note_path: pod.rel_path, destination: 'incubator' })
+                                    });
+                                    new obsidian.Notice(`Demoted ${pod.title} to Incubator.`);
+                                };
+                            } else if (cat === 'knowledge') {
+                                if (pod.filename) {
+                                    const playBtn = tdAction.createEl('button', { text: '▶️ Play' });
+                                    playBtn.onclick = () => {
+                                        window.activePodcastTitle = pod.title || pod.filename;
+                                        titleEl.textContent = `🔊 Playing: ${window.activePodcastTitle}`;
+                                        window.podcastAudio.src = pod.url.startsWith('http') ? pod.url : `${baseUrl}${pod.url}`;
+                                        window.podcastAudio.play();
+                                    };
+                                }
+                                const btnAddNote = tdAction.createEl('button', { text: '📝 Add Note' });
+                                btnAddNote.onclick = async () => {
+                                    const noteTxt = prompt("Enter note to append to markdown file:");
+                                    if (noteTxt && noteTxt.trim()) {
+                                        await fetch(`${baseUrl}/api/add_note`, {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ note_path: pod.rel_path, text: noteTxt.trim() })
+                                        });
+                                        new obsidian.Notice(`Note added to ${pod.title}!`);
+                                    }
+                                };
+                                const quizBtn = tdAction.createEl('button', { text: '🧩 Quiz' });
+                                quizBtn.onclick = async () => {
+                                    try {
+                                        const qRes = await fetch(`${baseUrl}/api/quiz?notebook_id=${pod.notebook_id || ''}&note_path=${encodeURIComponent(pod.rel_path || '')}`);
+                                        const qData = await qRes.json();
+                                        
+                                        if (qData.exists === false) {
+                                            const modal = document.createElement("div");
+                                            modal.style.position = "fixed";
+                                            modal.style.top = "50%";
+                                            modal.style.left = "50%";
+                                            modal.style.transform = "translate(-50%, -50%)";
+                                            modal.style.background = "var(--background-primary)";
+                                            modal.style.border = "1px solid var(--border-color)";
+                                            modal.style.borderRadius = "12px";
+                                            modal.style.padding = "24px";
+                                            modal.style.zIndex = "10000";
+                                            modal.style.boxShadow = "0 10px 30px rgba(0,0,0,0.4)";
+                                            modal.style.maxWidth = "450px";
+                                            
+                                            modal.innerHTML = `
+                                                <h3 style="margin-top:0;">🧩 NotebookLM Quiz</h3>
+                                                <p style="color: var(--text-muted);">${qData.message || 'Quiz artifact not yet generated.'}</p>
+                                                <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                                                    <button id="close-quiz-modal" style="padding: 6px 12px;">Close</button>
+                                                    <button id="gen-quiz-btn" style="padding: 6px 16px; background: var(--interactive-accent); color: var(--text-on-accent); font-weight: bold;">⚡ Generate Quiz</button>
+                                                </div>
+                                            `;
+                                            document.body.appendChild(modal);
+                                            
+                                            modal.querySelector("#close-quiz-modal").onclick = () => modal.remove();
+                                            modal.querySelector("#gen-quiz-btn").onclick = async () => {
+                                                modal.querySelector("#gen-quiz-btn").disabled = true;
+                                                modal.querySelector("#gen-quiz-btn").textContent = "⏳ Generating...";
+                                                new obsidian.Notice(`Generating NotebookLM Quiz for ${pod.title}...`);
+                                                this.runArtifactGeneratorForFile(pod.rel_path, 'quiz');
+                                                modal.remove();
+                                            };
+                                        } else {
+                                            new obsidian.Notice(`Loaded Quiz: ${qData.title || pod.title}`);
+                                        }
+                                    } catch (e) {
+                                        new obsidian.Notice(`Error loading quiz: ${e.message}`);
+                                    }
+                                };
+                                const btnDemote = tdAction.createEl('button', { text: '📥 Demote to Inbox' });
+                                btnDemote.onclick = async () => {
+                                    btnDemote.disabled = true;
+                                    await fetch(`${baseUrl}/api/move_note`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ note_path: pod.rel_path, destination: 'inbox' })
+                                    });
+                                    new obsidian.Notice(`Demoted ${pod.title} to Inbox.`);
+                                };
+                            } else if (cat === 'incubator') {
+                                const btnInbox = tdAction.createEl('button', { text: '📥 Move to Inbox' });
+                                btnInbox.onclick = async () => {
+                                    btnInbox.disabled = true;
+                                    await fetch(`${baseUrl}/api/move_note`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ note_path: pod.rel_path, destination: 'inbox' })
+                                    });
+                                    new obsidian.Notice(`Moved ${pod.title} to Inbox.`);
+                                };
+                                const btnKnowledge = tdAction.createEl('button', { text: '🎓 Promote to Knowledge' });
+                                btnKnowledge.onclick = async () => {
+                                    btnKnowledge.disabled = true;
+                                    await fetch(`${baseUrl}/api/move_note`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ note_path: pod.rel_path, destination: 'knowledge' })
+                                    });
+                                    new obsidian.Notice(`Promoted ${pod.title} to Knowledge.`);
+                                };
+                            }
+                        });
+                    };
+                    
+                    ['all', 'imports', 'inbox', 'incubator', 'knowledge', 'archive'].forEach(t => {
+                        const tabBtn = tabsContainer.createEl('button', { text: t.toUpperCase() });
+                        tabBtn.style.padding = '4px 12px';
+                        tabBtn.style.borderRadius = '4px';
+                        tabBtn.style.cursor = 'pointer';
+                        tabBtn.style.fontWeight = 'bold';
+                        tabBtn.onclick = () => {
+                            activeTab = t;
+                            renderList();
+                        };
                     });
+                    
+                    renderList();
                 })
                 .catch(err => {
                     console.error("[Podcast Player Hub] Failed to fetch catalog:", err);
