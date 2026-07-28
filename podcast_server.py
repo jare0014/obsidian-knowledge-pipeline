@@ -34,6 +34,11 @@ if os.path.exists(plugin_data_path):
 
 ATTACHMENTS_DIR = os.path.join(VAULT_DIR, "99_System", "Attachments")
 
+def clean_title(title):
+    clean = re.sub(r'[\\/*?:"<>|]', '', title)
+    clean = " ".join(clean.split())
+    return clean[:80]
+
 def fetch_notebooklm_quiz(notebook_id, note_path=""):
     """
     Fetch quiz questions for a notebook using notebooklm-py if available,
@@ -42,17 +47,20 @@ def fetch_notebooklm_quiz(notebook_id, note_path=""):
     # 1. Check for saved Quiz JSON file in 99_System/Attachments/Quizzes
     if note_path:
         note_basename = os.path.splitext(os.path.basename(note_path))[0]
-        quiz_json_filename = f"{note_basename} Quiz.json"
-        quiz_json_path = os.path.join(VAULT_DIR, "99_System", "Attachments", "Quizzes", quiz_json_filename)
-        
-        if os.path.exists(quiz_json_path):
-            try:
-                with open(quiz_json_path, "r", encoding="utf-8") as f:
-                    quiz_data = json.load(f)
-                    if quiz_data and "questions" in quiz_data:
-                        return quiz_data
-            except Exception:
-                pass
+        candidates = [
+            f"{note_basename} Quiz.json",
+            f"{clean_title(note_basename)} Quiz.json"
+        ]
+        for quiz_json_filename in candidates:
+            quiz_json_path = os.path.join(VAULT_DIR, "99_System", "Attachments", "Quizzes", quiz_json_filename)
+            if os.path.exists(quiz_json_path):
+                try:
+                    with open(quiz_json_path, "r", encoding="utf-8") as f:
+                        quiz_data = json.load(f)
+                        if quiz_data and "questions" in quiz_data:
+                            return quiz_data
+                except Exception:
+                    pass
 
     # 2. Extract from markdown note frontmatter / summary if note_path provided
     note_title = os.path.splitext(os.path.basename(note_path))[0] if note_path else "Knowledge Base Note"
@@ -296,6 +304,13 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                          (self.address_string(),
                           self.log_date_time_string(),
                           format%args))
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.end_headers()
 
     def do_GET(self):
         # Parse path
