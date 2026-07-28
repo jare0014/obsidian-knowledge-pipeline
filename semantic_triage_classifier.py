@@ -85,8 +85,12 @@ def process_batch_stage1_and_classification():
     proj_names = list(project_profiles.keys())
     proj_texts = [project_profiles[name] for name in proj_names]
 
-    vectorizer = TfidfVectorizer(max_features=2500, stop_words="english")
-    proj_vectors = vectorizer.fit_transform(proj_texts)
+    if HAS_SKLEARN and proj_texts:
+        vectorizer = TfidfVectorizer(max_features=2500, stop_words="english")
+        proj_vectors = vectorizer.fit_transform(proj_texts)
+    else:
+        vectorizer = None
+        proj_vectors = None
 
     for root, dirs, files in os.walk(IMPORTS_DIR):
         # Skip subdirectories like AI Conversations
@@ -115,12 +119,18 @@ def process_batch_stage1_and_classification():
                 target_project = None
                 if drg_matches >= 1 and not ("quant" in low_name and drg_matches == 1):
                     target_project = "Dynamical Representation Geometry"
-                else:
+                elif vectorizer and proj_vectors is not None:
                     note_vec = vectorizer.transform([f + " " + clean_text(body)[:3000]])
                     sims = cosine_similarity(note_vec, proj_vectors)[0]
                     best_idx = int(sims.argmax())
                     if float(sims[best_idx]) >= 0.12:
                         target_project = proj_names[best_idx]
+                else:
+                    # Keyword fallback
+                    for name in proj_names:
+                        if name.lower() in low_name:
+                            target_project = name
+                            break
 
                 if target_project:
                     fm["triage_topic"] = target_project
