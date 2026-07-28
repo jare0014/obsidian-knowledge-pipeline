@@ -33,6 +33,8 @@ if os.path.exists(plugin_data_path):
         pass
 
 ATTACHMENTS_DIR = os.path.join(VAULT_DIR, "99_System", "Attachments")
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
+os.makedirs(os.path.join(ATTACHMENTS_DIR, "Quizzes"), exist_ok=True)
 
 def clean_title(title):
     clean = re.sub(r'[\\/*?:"<>|]', '', title)
@@ -161,6 +163,7 @@ def get_podcast_list():
     """Scan vault directories for audio files (.mp3, .m4a, .wav, .ogg, .flac) and match metadata from markdown notes."""
     embed_map, basename_map = scan_notes_metadata(VAULT_DIR)
     podcasts = []
+    matched_note_titles = set()
     
     AUDIO_EXTENSIONS = ('.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac')
     seen_files = set()
@@ -223,7 +226,6 @@ def get_podcast_list():
                                 matched_note = info
                                 break
                                 
-            matched_note_titles = set()
             # Consolidate attributes
             if matched_note:
                 title = matched_note['title']
@@ -267,7 +269,10 @@ def get_podcast_list():
     # Include non-audio notes from stage folders so Imports/Inbox/Incubator/Knowledge tabs show all items
     for norm_title, info in basename_map.items():
         if info['title'] not in matched_note_titles:
-            mtime = os.path.getmtime(info['path']) if os.path.exists(info['path']) else 0
+            try:
+                mtime = os.path.getmtime(info['path']) if os.path.exists(info['path']) else 0
+            except Exception:
+                mtime = 0
             podcasts.append({
                 'filename': '',
                 'rel_path': info['rel_path'],
