@@ -156,6 +156,143 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             window.setInterval(() => this.updateStatusBar(), 5 * 60 * 1000)
         );
 
+        // Register native zero-lag Podcast Player Hub codeblock processor
+        this.registerMarkdownCodeblockProcessor("podcast-player-hub", (source, el, ctx) => {
+            el.empty();
+            const wrapper = el.createDiv({ cls: 'podcast-player-hub-wrapper' });
+            wrapper.style.padding = '10px 0';
+            
+            const port = this.settings.podcastServerPort || 8085;
+            const baseUrl = `http://localhost:${port}`;
+            
+            // Persistent Audio Object
+            if (!window.podcastAudio) {
+                window.podcastAudio = new Audio();
+            }
+            
+            const formatTime = (secs) => {
+                if (isNaN(secs) || secs === Infinity) return "0:00";
+                const m = Math.floor(secs / 60);
+                const s = Math.floor(secs % 60);
+                return `${m}:${s < 10 ? '0' : ''}${s}`;
+            };
+            
+            // Player Bar Container
+            const playerBar = wrapper.createDiv({ cls: 'podcast-player-bar' });
+            playerBar.style.background = 'var(--background-secondary)';
+            playerBar.style.border = '1px solid var(--border-color)';
+            playerBar.style.borderRadius = '8px';
+            playerBar.style.padding = '15px';
+            playerBar.style.marginBottom = '20px';
+            playerBar.style.display = 'flex';
+            playerBar.style.flexDirection = 'column';
+            playerBar.style.gap = '10px';
+            
+            const titleEl = playerBar.createDiv({ cls: 'podcast-title' });
+            titleEl.style.fontWeight = 'bold';
+            titleEl.style.fontSize = '1.1em';
+            titleEl.style.color = 'var(--text-normal)';
+            titleEl.textContent = window.activePodcastTitle ? `🔊 Playing: ${window.activePodcastTitle}` : "Select a podcast below to play";
+            
+            const controlsRow = playerBar.createDiv();
+            controlsRow.style.display = 'flex';
+            controlsRow.style.alignItems = 'center';
+            controlsRow.style.gap = '12px';
+            
+            const btnBack = controlsRow.createEl('button', { text: '⏪ -10s' });
+            btnBack.onclick = () => { window.podcastAudio.currentTime = Math.max(0, window.podcastAudio.currentTime - 10); };
+            
+            const btnPlay = controlsRow.createEl('button', { text: window.podcastAudio.paused ? '▶️ Play' : '⏸️ Pause' });
+            btnPlay.style.fontWeight = 'bold';
+            btnPlay.onclick = () => {
+                if (!window.podcastAudio.src) return;
+                if (window.podcastAudio.paused) window.podcastAudio.play();
+                else window.podcastAudio.pause();
+            };
+            
+            const btnFwd = controlsRow.createEl('button', { text: '+10s ⏩' });
+            btnFwd.onclick = () => { window.podcastAudio.currentTime = Math.min(window.podcastAudio.duration || 0, window.podcastAudio.currentTime + 10); };
+            
+            const slider = controlsRow.createEl('input');
+            slider.type = 'range';
+            slider.min = '0';
+            slider.max = '100';
+            slider.value = '0';
+            slider.style.flexGrow = '1';
+            slider.oninput = () => {
+                if (window.podcastAudio.duration) {
+                    window.podcastAudio.currentTime = (slider.value / 100) * window.podcastAudio.duration;
+                }
+            };
+            
+            const timeDisplay = controlsRow.createEl('span');
+            timeDisplay.style.fontSize = '0.9em';
+            timeDisplay.style.color = 'var(--text-muted)';
+            timeDisplay.style.minWidth = '80px';
+            timeDisplay.style.textAlign = 'right';
+            timeDisplay.textContent = '0:00 / 0:00';
+            
+            const updateUI = () => {
+                btnPlay.textContent = window.podcastAudio.paused ? '▶️ Play' : '⏸️ Pause';
+                const cur = window.podcastAudio.currentTime || 0;
+                const dur = window.podcastAudio.duration || 0;
+                if (dur > 0) {
+                    slider.value = ((cur / dur) * 100).toString();
+                    timeDisplay.textContent = `${formatTime(cur)} / ${formatTime(dur)}`;
+                }
+            };
+            
+            window.podcastAudio.onposttimeupdate = updateUI;
+            window.podcastAudio.ontimeupdate = updateUI;
+
+            // Fetch podcast catalog from Server
+            fetch(`${baseUrl}/api/podcasts`)
+                .then(res => res.json())
+                .then(data => {
+                    const podcasts = data.podcasts || [];
+                    if (podcasts.length === 0) {
+                        wrapper.createEl('p', { text: 'No audio podcasts found in vault.', style: 'color: var(--text-muted);' });
+                        return;
+                    }
+                    
+                    const tableContainer = wrapper.createDiv({ style: 'overflow-x: auto;' });
+                    const table = tableContainer.createEl('table');
+                    table.style.width = '100%';
+                    table.style.borderCollapse = 'collapse';
+                    
+                    const thead = table.createEl('thead');
+                    const hRow = thead.createEl('tr');
+                    ['Track', 'Folder', 'Action'].forEach(h => {
+                        const th = hRow.createEl('th', { text: h });
+                        th.style.textAlign = 'left';
+                        th.style.padding = '8px';
+                        th.style.borderBottom = '2px solid var(--background-modifier-border)';
+                    });
+                    
+                    const tbody = table.createEl('tbody');
+                    podcasts.forEach(pod => {
+                        const tr = tbody.createEl('tr');
+                        tr.style.borderBottom = '1px solid var(--background-modifier-border)';
+                        
+                        const tdName = tr.createEl('td', { text: pod.title || pod.filename, style: 'padding: 8px; font-weight: 500;' });
+                        const tdCategory = tr.createEl('td', { text: pod.category || 'General', style: 'padding: 8px; color: var(--text-muted);' });
+                        
+                        const tdAction = tr.createEl('td', { style: 'padding: 8px;' });
+                        const playBtn = tdAction.createEl('button', { text: '▶️ Play' });
+                        playBtn.onclick = () => {
+                            window.activePodcastTitle = pod.title || pod.filename;
+                            titleEl.textContent = `🔊 Playing: ${window.activePodcastTitle}`;
+                            window.podcastAudio.src = pod.url.startsWith('http') ? pod.url : `${baseUrl}${pod.url}`;
+                            window.podcastAudio.play();
+                        };
+                    });
+                })
+                .catch(err => {
+                    console.error("[Podcast Player Hub] Failed to fetch catalog:", err);
+                    wrapper.createEl('p', { text: `⚠️ Podcast server offline on ${baseUrl}. Run server to enable player.`, style: 'color: var(--text-warning);' });
+                });
+        });
+
         // Run legacy notes buttons migration
         this.app.workspace.onLayoutReady(() => {
             this.migrateExistingNotes();
