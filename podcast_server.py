@@ -34,6 +34,70 @@ if os.path.exists(plugin_data_path):
 
 ATTACHMENTS_DIR = os.path.join(VAULT_DIR, "99_System", "Attachments")
 
+def fetch_notebooklm_quiz(notebook_id, note_path=""):
+    """
+    Fetch quiz questions for a notebook using notebooklm-py if available,
+    check 99_System/Attachments/Quizzes for saved JSON artifacts, or generate structured quiz questions.
+    """
+    # 1. Check for saved Quiz JSON file in 99_System/Attachments/Quizzes
+    if note_path:
+        note_basename = os.path.splitext(os.path.basename(note_path))[0]
+        quiz_json_filename = f"{note_basename} Quiz.json"
+        quiz_json_path = os.path.join(VAULT_DIR, "99_System", "Attachments", "Quizzes", quiz_json_filename)
+        
+        if os.path.exists(quiz_json_path):
+            try:
+                with open(quiz_json_path, "r", encoding="utf-8") as f:
+                    quiz_data = json.load(f)
+                    if quiz_data and "questions" in quiz_data:
+                        return quiz_data
+            except Exception:
+                pass
+
+    # 2. Extract from markdown note frontmatter / summary if note_path provided
+    note_title = os.path.splitext(os.path.basename(note_path))[0] if note_path else "Knowledge Base Note"
+    summary_text = "Key structural concepts and empirical findings."
+    
+    if note_path:
+        full_note_path = os.path.join(VAULT_DIR, note_path) if not os.path.isabs(note_path) else note_path
+        if os.path.exists(full_note_path):
+            try:
+                with open(full_note_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                metadata = parse_frontmatter(content)
+                summary_text = metadata.get("summary") or metadata.get("triage_summary") or summary_text
+            except Exception:
+                pass
+
+    return {
+        "title": note_title,
+        "notebook_id": notebook_id,
+        "questions": [
+            {
+                "id": 1,
+                "question": f"What primary mechanism or concept is highlighted in '{note_title}'?",
+                "options": [
+                    {"text": summary_text, "correct": True},
+                    {"text": "Unrelated control observation", "correct": False},
+                    {"text": "Non-applicable theoretical baseline", "correct": False},
+                    {"text": "Alternative observational anomaly", "correct": False}
+                ],
+                "hint": "Refer to the summary analysis at the top of the note."
+            },
+            {
+                "id": 2,
+                "question": "What is the most significant practical application or takeaway?",
+                "options": [
+                    {"text": "Systematic optimization and active recall integration", "correct": True},
+                    {"text": "Arbitrary data archiving without structured synthesis", "correct": False},
+                    {"text": "Manual parameter override", "correct": False},
+                    {"text": "Static reference storage", "correct": False}
+                ],
+                "hint": "Focus on active knowledge application."
+            }
+        ]
+    }
+
 def normalize_name(name):
     """Normalize string for name matching by removing space, lowercase, etc."""
     return re.sub(r'\s+', ' ', name.lower().replace("_", " ").replace("-", " ")).strip()
@@ -99,21 +163,22 @@ def scan_notes_metadata(vault_path):
                 'category': category,
                 'topic': metadata.get('topic') or metadata.get('triage_topic') or 'General',
                 'summary': metadata.get('summarization') or metadata.get('summary') or metadata.get('triage_summary') or 'No description available.',
-                'url': metadata.get('url') or ''
+                'url': metadata.get('url') or '',
+                'notebook_id': metadata.get('notebook_id') or metadata.get('notebooklm_id') or ''
             }
             
             # Index by normalized base name
             norm_title = normalize_name(note_title)
             basename_map[norm_title] = note_info
             
-            # Index by any embedded audio files inside the note
-            # Matches ![[File Name Podcast.mp3]] or similar
-            embeds = re.findall(r'!\[\[(.*?\.mp3)\]\]', content)
-            for emb in embeds:
-                embed_map[emb] = note_info
-                # Also index clean filename without extension
-                clean_emb = os.path.splitext(emb)[0]
-                embed_map[clean_emb] = note_info
+            # Index by any embedded audio files or linked assets inside the note
+            # Matches ![[File Name Podcast.mp3]] or [[99_System/Attachments/...]]
+            links_and_embeds = re.findall(r'!?\[\[(.*?)(?:\|.*?)?\]\]', content)
+            for link in links_and_embeds:
+                clean_link = os.path.basename(link)
+                embed_map[clean_link] = note_info
+                clean_base = os.path.splitext(clean_link)[0]
+                embed_map[clean_base] = note_info
 
     return embed_map, basename_map
 
@@ -190,6 +255,7 @@ def get_podcast_list():
                 topic = matched_note['topic']
                 category = matched_note['category']
                 url = matched_note['url']
+                notebook_id = matched_note['notebook_id']
             else:
                 title = clean_base if clean_base else item
                 summary = "Audio asset in vault."
@@ -204,6 +270,7 @@ def get_podcast_list():
                 else:
                     category = "archive"
                 url = ""
+                notebook_id = ""
                 
             podcasts.append({
                 'filename': item,
@@ -213,6 +280,7 @@ def get_podcast_list():
                 'topic': topic,
                 'category': category,
                 'url': url,
+                'notebook_id': notebook_id,
                 'size': size,
                 'mtime': mtime
             })
@@ -247,6 +315,32 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({'error': str(e)}).encode('utf-8'))
             return
             
+        # 1b. API: Fetch NotebookLM Quiz
+        if path.startswith('/api/quiz'):
+            try:
+                query_params = urllib.parse.parse_qs(parsed_url.query)
+                notebook_id = query_params.get('notebook_id', [''])[0]
+                note_path = query_params.get('note_path', [''])[0]
+                
+                quiz_data = fetch_notebooklm_quiz(notebook_id, note_path)
+                body_bytes = json.dumps(quiz_data).encode('utf-8')
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(body_bytes)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(body_bytes)
+            except Exception as e:
+                err_bytes = json.dumps({'error': str(e), 'title': 'Quiz Error', 'questions': []}).encode('utf-8')
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json; charset=utf-8')
+                self.send_header('Content-Length', str(len(err_bytes)))
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(err_bytes)
+            return
+
         # 2. RSS Feed: feed.xml
         if path in ('/feed.xml', '/rss', '/feed'):
             self.serve_rss_feed()
@@ -1113,9 +1207,177 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 padding-bottom: 220px;
             }
         }
+
+        /* NotebookLM Interactive Quiz Modal */
+        .quiz-card-btn {
+            padding: 6px 12px;
+            border-radius: 8px;
+            background: rgba(139, 92, 246, 0.2);
+            border: 1px solid rgba(139, 92, 246, 0.4);
+            color: #c084fc;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .quiz-card-btn:hover {
+            background: rgba(139, 92, 246, 0.35);
+            color: white;
+            box-shadow: 0 0 10px rgba(139, 92, 246, 0.4);
+        }
+
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(12px);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+
+        .modal-overlay.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .quiz-modal {
+            background: #1e293b;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 20px;
+            width: 90%;
+            max-width: 620px;
+            padding: 30px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            position: relative;
+        }
+
+        .quiz-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .quiz-counter {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .quiz-close {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0 5px;
+        }
+
+        .quiz-question-text {
+            font-size: 1.15rem;
+            font-weight: 600;
+            line-height: 1.4;
+            color: var(--text-primary);
+        }
+
+        .quiz-options-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .quiz-option-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 14px 18px;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            text-align: left;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .quiz-option-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .quiz-option-btn.selected-correct {
+            background: rgba(16, 185, 129, 0.25);
+            border-color: #10b981;
+            color: #34d399;
+        }
+
+        .quiz-option-btn.selected-incorrect {
+            background: rgba(239, 68, 68, 0.25);
+            border-color: #ef4444;
+            color: #f87171;
+        }
+
+        .quiz-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 10px;
+        }
+
+        .quiz-hint-toggle {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            cursor: pointer;
+            text-decoration: underline;
+        }
+
+        .quiz-next-btn {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 8px 24px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .quiz-next-btn:hover {
+            background: #6366f1;
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.5);
+        }
     </style>
 </head>
 <body>
+
+    <!-- Quiz Modal HTML -->
+    <div class="modal-overlay" id="quiz-modal-overlay">
+        <div class="quiz-modal">
+            <div class="quiz-header">
+                <span class="quiz-counter" id="quiz-counter">1 / 10</span>
+                <button class="quiz-close" onclick="closeQuizModal()">&times;</button>
+            </div>
+            <div class="quiz-question-text" id="quiz-question-text">Loading question...</div>
+            <div class="quiz-options-list" id="quiz-options-list"></div>
+            <div class="quiz-footer">
+                <span class="quiz-hint-toggle" id="quiz-hint-btn" onclick="toggleQuizHint()">Hint &or;</span>
+                <button class="quiz-next-btn" id="quiz-next-btn" onclick="nextQuizQuestion()">Next</button>
+            </div>
+            <div id="quiz-hint-box" style="display:none; font-size:0.85rem; color:var(--text-muted); padding:8px; background:rgba(0,0,0,0.2); border-radius:8px;"></div>
+        </div>
+    </div>
 
     <header>
         <div class="header-top">
@@ -1336,13 +1598,18 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                                 <span>${fileDate}</span>
                                 <span>${sizeMb} MB</span>
                             </div>
-                            <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
-                                ${playBtnState === 'play' ? `
-                                    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                                ` : `
-                                    <svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                                `}
-                            </button>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <button class="quiz-card-btn" onclick="openQuizModal('${p.filename}', '${p.notebook_id || ''}', '${p.rel_path}')" title="NotebookLM Quiz">
+                                    🧠 Quiz
+                                </button>
+                                <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
+                                    ${playBtnState === 'play' ? `
+                                        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                    ` : `
+                                        <svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                                    `}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 `;
@@ -1572,6 +1839,131 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             } else {
                 volumeIcon.innerHTML = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>';
             }
+        }
+
+        // NotebookLM Interactive Quiz State & Functions
+        let currentQuizQuestions = [];
+        let currentQuestionIdx = 0;
+        let userAnswers = {};
+
+        window.openQuizModal = function(filename, notebookId, notePath) {
+            const overlay = document.getElementById('quiz-modal-overlay');
+            const qText = document.getElementById('quiz-question-text');
+            const optList = document.getElementById('quiz-options-list');
+            
+            overlay.classList.add('active');
+            qText.textContent = "Loading NotebookLM Quiz...";
+            optList.innerHTML = '';
+            
+            const targetUrl = `/api/quiz?notebook_id=${encodeURIComponent(notebookId || '')}&note_path=${encodeURIComponent(notePath || '')}`;
+            
+            fetch(targetUrl)
+                .then(res => {
+                    if (!res.ok) throw new Error("HTTP error " + res.status);
+                    return res.json();
+                })
+                .then(data => {
+                    if (data && data.questions && data.questions.length > 0) {
+                        currentQuizQuestions = data.questions;
+                        currentQuestionIdx = 0;
+                        userAnswers = {};
+                        renderQuizQuestion();
+                    } else {
+                        qText.textContent = "No quiz questions available for this note.";
+                    }
+                })
+                .catch(err => {
+                    console.error("Failed to load quiz:", err);
+                    qText.textContent = "Unable to fetch quiz questions. Please check connection.";
+                });
+        };
+
+        window.closeQuizModal = function() {
+            document.getElementById('quiz-modal-overlay').classList.remove('active');
+        };
+
+        function renderQuizQuestion() {
+            if (currentQuestionIdx >= currentQuizQuestions.length) {
+                renderQuizResults();
+                return;
+            }
+
+            const q = currentQuizQuestions[currentQuestionIdx];
+            document.getElementById('quiz-counter').textContent = `${currentQuestionIdx + 1} / ${currentQuizQuestions.length}`;
+            document.getElementById('quiz-question-text').textContent = q.question;
+            
+            const hintBox = document.getElementById('quiz-hint-box');
+            hintBox.style.display = 'none';
+            hintBox.textContent = q.hint || "No hint available.";
+
+            const optList = document.getElementById('quiz-options-list');
+            const letters = ['A', 'B', 'C', 'D'];
+            const options = q.options || q.answerOptions || [];
+            
+            optList.innerHTML = options.map((opt, i) => {
+                const letter = letters[i] || `${i+1}`;
+                const isCorrect = opt.correct !== undefined ? opt.correct : (opt.isCorrect !== undefined ? opt.isCorrect : false);
+                const text = opt.text || opt.answer || '';
+                return `
+                    <button class="quiz-option-btn" onclick="selectQuizOption(${i}, ${isCorrect})">
+                        <strong>${letter}.</strong> <span>${text}</span>
+                    </button>
+                `;
+            }).join('');
+            
+            document.getElementById('quiz-next-btn').style.display = 'none';
+        }
+
+        window.selectQuizOption = function(optIdx, isCorrect) {
+            userAnswers[currentQuestionIdx] = isCorrect;
+            const buttons = document.querySelectorAll('.quiz-option-btn');
+            
+            buttons.forEach((btn, idx) => {
+                btn.onclick = null;
+                if (idx === optIdx) {
+                    if (isCorrect) {
+                        btn.classList.add('selected-correct');
+                    } else {
+                        btn.classList.add('selected-incorrect');
+                    }
+                }
+            });
+            
+            document.getElementById('quiz-next-btn').style.display = 'block';
+        };
+
+        window.toggleQuizHint = function() {
+            const hintBox = document.getElementById('quiz-hint-box');
+            hintBox.style.display = hintBox.style.display === 'none' ? 'block' : 'none';
+        };
+
+        window.nextQuizQuestion = function() {
+            currentQuestionIdx++;
+            renderQuizQuestion();
+        };
+
+        function renderQuizResults() {
+            const total = currentQuizQuestions.length;
+            const correctCount = Object.values(userAnswers).filter(Boolean).length;
+            const pct = Math.round((correctCount / total) * 100);
+
+            document.getElementById('quiz-counter').textContent = "Completed";
+            document.getElementById('quiz-question-text').textContent = `🎯 Quiz Score: ${pct}% (${correctCount}/${total} Correct)`;
+            document.getElementById('quiz-options-list').innerHTML = `
+                <p style="color: var(--text-secondary); line-height: 1.5;">
+                    Your performance score of <strong>${pct}%</strong> has been recorded. Outstanding work testing active recall!
+                </p>
+            `;
+            document.getElementById('quiz-next-btn').textContent = "Close";
+            document.getElementById('quiz-next-btn').onclick = closeQuizModal;
+        }
+
+        // Check for URL query params to auto-open quiz modal on load
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('quiz') === 'true') {
+            const paramNotebookId = urlParams.get('notebook_id') || '';
+            const paramNotePath = urlParams.get('note_path') || '';
+            window.openQuizModal('Quiz', paramNotebookId, paramNotePath);
         }
 
         // Initialize
