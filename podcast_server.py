@@ -62,48 +62,15 @@ def fetch_notebooklm_quiz(notebook_id, note_path=""):
                 except Exception:
                     pass
 
-    # 2. Extract from markdown note frontmatter / summary if note_path provided
+    # 2. Return ungenerated status if quiz artifact does not exist
     note_title = os.path.splitext(os.path.basename(note_path))[0] if note_path else "Knowledge Base Note"
-    summary_text = "Key structural concepts and empirical findings."
-    
-    if note_path:
-        full_note_path = os.path.join(VAULT_DIR, note_path) if not os.path.isabs(note_path) else note_path
-        if os.path.exists(full_note_path):
-            try:
-                with open(full_note_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-                metadata = parse_frontmatter(content)
-                summary_text = metadata.get("summary") or metadata.get("triage_summary") or summary_text
-            except Exception:
-                pass
-
     return {
+        "exists": False,
         "title": note_title,
         "notebook_id": notebook_id,
-        "questions": [
-            {
-                "id": 1,
-                "question": f"What primary mechanism or concept is highlighted in '{note_title}'?",
-                "options": [
-                    {"text": summary_text, "correct": True},
-                    {"text": "Unrelated control observation", "correct": False},
-                    {"text": "Non-applicable theoretical baseline", "correct": False},
-                    {"text": "Alternative observational anomaly", "correct": False}
-                ],
-                "hint": "Refer to the summary analysis at the top of the note."
-            },
-            {
-                "id": 2,
-                "question": "What is the most significant practical application or takeaway?",
-                "options": [
-                    {"text": "Systematic optimization and active recall integration", "correct": True},
-                    {"text": "Arbitrary data archiving without structured synthesis", "correct": False},
-                    {"text": "Manual parameter override", "correct": False},
-                    {"text": "Static reference storage", "correct": False}
-                ],
-                "hint": "Focus on active knowledge application."
-            }
-        ]
+        "note_path": note_path,
+        "questions": [],
+        "message": f"Quiz not yet generated for '{note_title}'. Promote to Knowledge or generate quiz to link it to this note."
     }
 
 def normalize_name(name):

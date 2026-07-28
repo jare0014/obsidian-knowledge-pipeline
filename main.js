@@ -262,7 +262,7 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
                     
                     const thead = table.createEl('thead');
                     const hRow = thead.createEl('tr');
-                    ['Track', 'Folder', 'Action'].forEach(h => {
+                    ['Track', 'Stage', 'Actions'].forEach(h => {
                         const th = hRow.createEl('th', { text: h });
                         th.style.textAlign = 'left';
                         th.style.padding = '8px';
@@ -275,9 +275,9 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
                         tr.style.borderBottom = '1px solid var(--background-modifier-border)';
                         
                         const tdName = tr.createEl('td', { text: pod.title || pod.filename, style: 'padding: 8px; font-weight: 500;' });
-                        const tdCategory = tr.createEl('td', { text: pod.category || 'General', style: 'padding: 8px; color: var(--text-muted);' });
+                        const tdCategory = tr.createEl('td', { text: (pod.category || 'general').toUpperCase(), style: 'padding: 8px; color: var(--text-muted); font-size: 0.85em;' });
                         
-                        const tdAction = tr.createEl('td', { style: 'padding: 8px;' });
+                        const tdAction = tr.createEl('td', { style: 'padding: 8px; display: flex; gap: 6px;' });
                         const playBtn = tdAction.createEl('button', { text: '▶️ Play' });
                         playBtn.onclick = () => {
                             window.activePodcastTitle = pod.title || pod.filename;
@@ -285,6 +285,55 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
                             window.podcastAudio.src = pod.url.startsWith('http') ? pod.url : `${baseUrl}${pod.url}`;
                             window.podcastAudio.play();
                         };
+                        
+                        // Quiz button ONLY appears for Knowledge category notes
+                        if (pod.category === 'knowledge') {
+                            const quizBtn = tdAction.createEl('button', { text: '🧩 Quiz' });
+                            quizBtn.onclick = async () => {
+                                try {
+                                    const qRes = await fetch(`${baseUrl}/api/quiz?notebook_id=${pod.notebook_id || ''}&note_path=${encodeURIComponent(pod.rel_path || '')}`);
+                                    const qData = await qRes.json();
+                                    
+                                    if (qData.exists === false) {
+                                        const modal = document.createElement("div");
+                                        modal.style.position = "fixed";
+                                        modal.style.top = "50%";
+                                        modal.style.left = "50%";
+                                        modal.style.transform = "translate(-50%, -50%)";
+                                        modal.style.background = "var(--background-primary)";
+                                        modal.style.border = "1px solid var(--border-color)";
+                                        modal.style.borderRadius = "12px";
+                                        modal.style.padding = "24px";
+                                        modal.style.zIndex = "10000";
+                                        modal.style.boxShadow = "0 10px 30px rgba(0,0,0,0.4)";
+                                        modal.style.maxWidth = "450px";
+                                        
+                                        modal.innerHTML = `
+                                            <h3 style="margin-top:0;">🧩 NotebookLM Quiz</h3>
+                                            <p style="color: var(--text-muted);">${qData.message || 'Quiz artifact not yet generated.'}</p>
+                                            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                                                <button id="close-quiz-modal" style="padding: 6px 12px;">Close</button>
+                                                <button id="gen-quiz-btn" style="padding: 6px 16px; background: var(--interactive-accent); color: var(--text-on-accent); font-weight: bold;">⚡ Generate Quiz</button>
+                                            </div>
+                                        `;
+                                        document.body.appendChild(modal);
+                                        
+                                        modal.querySelector("#close-quiz-modal").onclick = () => modal.remove();
+                                        modal.querySelector("#gen-quiz-btn").onclick = async () => {
+                                            modal.querySelector("#gen-quiz-btn").disabled = true;
+                                            modal.querySelector("#gen-quiz-btn").textContent = "⏳ Generating...";
+                                            new obsidian.Notice(`Generating NotebookLM Quiz for ${pod.title}...`);
+                                            this.runArtifactGeneratorForFile(pod.rel_path, 'quiz');
+                                            modal.remove();
+                                        };
+                                    } else {
+                                        new obsidian.Notice(`Loaded Quiz: ${qData.title || pod.title}`);
+                                    }
+                                } catch (e) {
+                                    new obsidian.Notice(`Error loading quiz: ${e.message}`);
+                                }
+                            };
+                        }
                     });
                 })
                 .catch(err => {
