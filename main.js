@@ -51,37 +51,33 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
             const fs = require('fs');
 
             const vaultPath = this.app.vault.adapter.getBasePath();
-            const scriptPath = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline', 'podcast_server.py');
+            const pluginDir = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline');
+            const scriptPath = path.join(pluginDir, 'podcast_server.py');
 
-            const vbsPath = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline', 'run_hidden.vbs');
-            if (fs.existsSync(vbsPath)) {
-                console.log("[Knowledge Pipeline] Starting Podcast Server silently via VBScript...");
-                this.podcastServerProcess = child_process.spawn('wscript.exe', [vbsPath], {
-                    cwd: path.dirname(vbsPath),
-                    detached: true,
-                    windowsHide: true,
-                    stdio: 'ignore'
-                });
-                this.podcastServerProcess.unref();
-                console.log("[Knowledge Pipeline] Podcast Server started in background.");
-                return;
+            const venvPythonw = path.join(pluginDir, '.venv', 'Scripts', 'pythonw.exe');
+            const venvPython = path.join(pluginDir, '.venv', 'Scripts', 'python.exe');
+            let pythonBin = 'python';
+            if (fs.existsSync(venvPythonw)) {
+                pythonBin = venvPythonw;
+            } else if (fs.existsSync(venvPython)) {
+                pythonBin = venvPython;
+            } else {
+                pythonBin = this.getPythonCmd();
             }
 
-            const pythonCmd = this.getPythonCmd();
-            
-            console.log("[Knowledge Pipeline] Starting Podcast Server...");
-            
-            this.podcastServerProcess = child_process.spawn(pythonCmd, [scriptPath], {
-                cwd: path.dirname(scriptPath),
+            console.log(`[Knowledge Pipeline] Starting Podcast Server via ${pythonBin}...`);
+
+            this.podcastServerProcess = child_process.spawn(pythonBin, [scriptPath], {
+                cwd: pluginDir,
                 detached: true,
                 windowsHide: true,
                 stdio: 'ignore'
             });
-            
+
             this.podcastServerProcess.on('error', (err) => {
                 console.error("[Knowledge Pipeline] Podcast server failed to start:", err);
             });
-            
+
             this.podcastServerProcess.unref();
             console.log("[Knowledge Pipeline] Podcast Server started in background.");
         } catch (e) {

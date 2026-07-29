@@ -6,8 +6,19 @@ import urllib.parse
 import http.server
 import socketserver
 import xml.etree.ElementTree as ET
+import io
 from datetime import datetime
 import email.utils
+
+# If running without console, redirect stdout/stderr to podcast_server.log
+LOG_FILE = os.path.join(os.path.dirname(__file__), "podcast_server.log")
+try:
+    if sys.stdout is None or not hasattr(sys.stdout, "write"):
+        sys.stdout = open(LOG_FILE, "a", encoding="utf-8")
+    if sys.stderr is None or not hasattr(sys.stderr, "write"):
+        sys.stderr = open(LOG_FILE, "a", encoding="utf-8")
+except Exception:
+    pass
 
 # Default Paths (relative to the Obsidian vault root)
 PORT = 8085
@@ -102,8 +113,8 @@ def scan_notes_metadata(vault_path):
     
     # Walk the Obsidian vault directories
     for root, dirs, files in os.walk(vault_path):
-        # Skip hidden or system directories to improve speed
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("venv", ".venv", "node_modules")]
+        # Skip hidden, system, and junction project directories to prevent infinite recursive loop
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("venv", ".venv", "node_modules", ".trash", "04_Projects", ".agents", ".obsidian")]
         
         for file in files:
             if not file.endswith(".md"):
@@ -169,8 +180,8 @@ def get_podcast_list():
     seen_files = set()
 
     for root, dirs, files in os.walk(VAULT_DIR):
-        # Skip hidden or system directories to improve speed
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("venv", ".venv", "node_modules", ".trash", "04_Projects")]
+        # Skip hidden, system, and junction project directories to prevent infinite recursive loop
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("venv", ".venv", "node_modules", ".trash", "04_Projects", ".agents", ".obsidian")]
         
         for item in files:
             if not item.lower().endswith(AUDIO_EXTENSIONS):
@@ -2183,11 +2194,17 @@ def main():
     print("=" * 60)
     
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("0.0.0.0", PORT), PodcastHTTPHandler) as httpd:
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\n[-] Shutting down podcast server.")
+    try:
+        with socketserver.TCPServer(("0.0.0.0", PORT), PodcastHTTPHandler) as httpd:
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                print("\n[-] Shutting down podcast server.")
+    except OSError as e:
+        if getattr(e, 'winerror', None) == 10048 or "Address already in use" in str(e):
+            print(f"[!] Server is already running on port {PORT}. Exiting duplicate process.")
+        else:
+            raise e
 
 if __name__ == "__main__":
     main()

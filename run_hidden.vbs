@@ -7,5 +7,5 @@ pythonExe = scriptDir & "\.venv\Scripts\pythonw.exe"
 scriptPath = scriptDir & "\podcast_server.py"
 
 WshShell.CurrentDirectory = scriptDir
-WshShell.Run """" & pythonExe & """ -u """ & scriptPath & """", 0, False
+WshShell.Run """" & pythonExe & """ """ & scriptPath & """", 0, False
 
