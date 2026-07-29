@@ -273,7 +273,7 @@ def get_podcast_list():
                 
             podcasts.append({
                 'filename': item,
-                'rel_path': os.path.relpath(file_path, VAULT_DIR).replace("\\", "/"),
+                'rel_path': matched_note['rel_path'] if matched_note else os.path.relpath(file_path, VAULT_DIR).replace("\\", "/"),
                 'title': title,
                 'summary': summary,
                 'topic': topic,
@@ -432,6 +432,14 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 return
                 
             full_path = os.path.join(VAULT_DIR, note_rel_path) if not os.path.isabs(note_rel_path) else note_rel_path
+            if not os.path.exists(full_path) or full_path.lower().endswith(('.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac')):
+                clean_base = os.path.splitext(os.path.basename(note_rel_path))[0]
+                clean_base = re.sub(r'Podcast(\s*\(\d+\))?$', '', clean_base, flags=re.IGNORECASE).strip()
+                embed_map, basename_map = scan_notes_metadata(VAULT_DIR)
+                matched = basename_map.get(normalize_name(clean_base)) or embed_map.get(clean_base) or embed_map.get(os.path.basename(note_rel_path))
+                if matched:
+                    full_path = matched['path']
+
             if os.path.exists(full_path):
                 date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
                 append_block = f"\n\n### 📝 Note Added ({date_str})\n{note_text}\n"
@@ -439,7 +447,7 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                     f.write(append_block)
                 self._send_json({'success': True, 'message': f'Appended note to {os.path.basename(full_path)}'})
             else:
-                self._send_json({'error': 'Note file not found'}, status=404)
+                self._send_json({'error': f'Note file not found: {os.path.basename(note_rel_path)}'}, status=404)
             return
 
         if path == '/api/move_note':
@@ -450,8 +458,16 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 return
                 
             src_full = os.path.join(VAULT_DIR, note_rel_path) if not os.path.isabs(note_rel_path) else note_rel_path
+            if not os.path.exists(src_full) or src_full.lower().endswith(('.mp3', '.m4a', '.wav', '.ogg', '.flac', '.aac')):
+                clean_base = os.path.splitext(os.path.basename(note_rel_path))[0]
+                clean_base = re.sub(r'Podcast(\s*\(\d+\))?$', '', clean_base, flags=re.IGNORECASE).strip()
+                embed_map, basename_map = scan_notes_metadata(VAULT_DIR)
+                matched = basename_map.get(normalize_name(clean_base)) or embed_map.get(clean_base) or embed_map.get(os.path.basename(note_rel_path))
+                if matched:
+                    src_full = matched['path']
+
             if not os.path.exists(src_full):
-                self._send_json({'error': 'Source file not found'}, status=404)
+                self._send_json({'error': f'Source markdown note not found: {os.path.basename(note_rel_path)}'}, status=404)
                 return
                 
             folder_map = {
@@ -472,8 +488,10 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             if dest_stage == 'inbox':
                 python_bin = sys.executable
                 script_path = os.path.join(os.path.dirname(__file__), 'generate_artifact.py')
-                subprocess.Popen([python_bin, script_path, dest_full, 'audio'], shell=False)
-                subprocess.Popen([python_bin, script_path, dest_full, 'mind-map'], shell=False)
+                sub_env = os.environ.copy()
+                sub_env["PYTHONIOENCODING"] = "utf-8"
+                subprocess.Popen([python_bin, script_path, dest_full, 'audio'], shell=False, env=sub_env)
+                subprocess.Popen([python_bin, script_path, dest_full, 'mind-map'], shell=False, env=sub_env)
 
             # If moved to Knowledge -> trigger Quiz generation if missing
             if dest_stage == 'knowledge':
