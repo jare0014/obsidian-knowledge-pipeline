@@ -1673,10 +1673,15 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             return `${m}:${s < 10 ? '0' : ''}${s}`;
         }
 
+        function getApiUrl(path) {
+            const origin = window.location.origin && window.location.origin.startsWith('http') ? window.location.origin : 'http://localhost:8085';
+            return origin + path;
+        }
+
         // Fetch Podcasts
         async function fetchPodcasts() {
             try {
-                const res = await fetch('/api/podcasts');
+                const res = await fetch(getApiUrl('/api/podcasts'));
                 allPodcasts = await res.json();
                 renderPodcasts();
             } catch (err) {
@@ -1902,7 +1907,7 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 }
             } else {
                 const targetPath = relPath || (podcast ? podcast.rel_path : '');
-                if (confirm("No podcast audio generated yet for this note.\n\nWould you like to generate a podcast with NotebookLM now?")) {
+                if (confirm("No podcast audio generated yet for this note. Would you like to generate a podcast with NotebookLM now?")) {
                     window.triggerGenerateArtifact(targetPath, 'audio');
                 }
             }
@@ -2104,7 +2109,7 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                         renderQuizQuestion();
                     } else {
                         overlay.classList.remove('active');
-                        if (confirm("Quiz not yet generated for this note.\n\nWould you like to generate a Quiz with NotebookLM now?")) {
+                        if (confirm("Quiz not yet generated for this note. Would you like to generate a Quiz with NotebookLM now?")) {
                             window.triggerGenerateArtifact(notePath, 'quiz');
                         }
                     }
