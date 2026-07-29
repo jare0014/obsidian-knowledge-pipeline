@@ -15,6 +15,10 @@ import email.utils
 # If running without console, redirect stdout/stderr to podcast_server.log
 LOG_FILE = os.path.join(os.path.dirname(__file__), "podcast_server.log")
 try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
     if sys.stdout is None or not hasattr(sys.stdout, "write"):
         sys.stdout = open(LOG_FILE, "a", encoding="utf-8")
     if sys.stderr is None or not hasattr(sys.stderr, "write"):
@@ -475,7 +479,9 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             if dest_stage == 'knowledge':
                 python_bin = sys.executable
                 script_path = os.path.join(os.path.dirname(__file__), 'generate_artifact.py')
-                subprocess.Popen([python_bin, script_path, dest_full, 'quiz'], shell=False)
+                sub_env = os.environ.copy()
+                sub_env["PYTHONIOENCODING"] = "utf-8"
+                subprocess.Popen([python_bin, script_path, dest_full, 'quiz'], shell=False, env=sub_env)
 
             self._send_json({'success': True, 'new_path': new_rel_path, 'message': f'Moved note to {dest_folder_name}'})
             return
@@ -493,7 +499,9 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             
             python_bin = sys.executable
             script_path = os.path.join(os.path.dirname(__file__), 'generate_artifact.py')
-            subprocess.Popen([python_bin, script_path, src_full, artifact_type], shell=False)
+            sub_env = os.environ.copy()
+            sub_env["PYTHONIOENCODING"] = "utf-8"
+            subprocess.Popen([python_bin, script_path, src_full, artifact_type], shell=False, env=sub_env)
             self._send_json({'success': True, 'message': f'Triggered {artifact_type} generation in background for {os.path.basename(src_full)}'})
             return
             
@@ -1508,6 +1516,40 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
         </div>
     </div>
 
+    <!-- Add Note Modal HTML -->
+    <div class="modal-overlay" id="note-modal-overlay">
+        <div class="quiz-modal" style="max-width: 520px;">
+            <div class="quiz-header">
+                <h3 style="color: #fff; margin:0; font-size: 1.1rem;">📝 Add Note to Markdown File</h3>
+                <button class="quiz-close" onclick="closeNoteModal()">&times;</button>
+            </div>
+            <div style="padding: 16px;">
+                <textarea id="note-text-input" style="width: 100%; height: 130px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: #fff; padding: 12px; border-radius: 8px; font-family: inherit; font-size: 0.95rem; resize: vertical; box-sizing: border-box;" placeholder="Type your note content here..."></textarea>
+            </div>
+            <div class="quiz-footer" style="justify-content: flex-end; gap: 8px;">
+                <button class="action-btn demote-btn" onclick="closeNoteModal()">Cancel</button>
+                <button class="action-btn promote-btn" id="save-note-btn">Save Note</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Modal HTML -->
+    <div class="modal-overlay" id="confirm-modal-overlay">
+        <div class="quiz-modal" style="max-width: 480px;">
+            <div class="quiz-header">
+                <h3 id="confirm-modal-title" style="color: #fff; margin:0; font-size: 1.1rem;">Confirm Action</h3>
+                <button class="quiz-close" onclick="closeConfirmModal()">&times;</button>
+            </div>
+            <div style="padding: 16px;">
+                <p id="confirm-modal-message" style="color: var(--text-secondary); line-height: 1.5; margin: 0; font-size: 0.95rem;"></p>
+            </div>
+            <div class="quiz-footer" style="justify-content: flex-end; gap: 8px;">
+                <button class="action-btn demote-btn" onclick="closeConfirmModal()">Cancel</button>
+                <button class="action-btn promote-btn" id="confirm-modal-ok-btn">Proceed</button>
+            </div>
+        </div>
+    </div>
+
     <header>
         <div class="header-top">
             <div class="logo-section">
@@ -1795,6 +1837,80 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             return origin + path;
         }
 
+        // Floating Toast Notification System
+        function showToast(msg, isError = false) {
+            let toast = document.getElementById('app-toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'app-toast';
+                toast.style.cssText = 'position: fixed; bottom: 24px; right: 24px; z-index: 10000; padding: 12px 20px; border-radius: 10px; font-size: 0.9rem; font-weight: 600; color: #fff; box-shadow: 0 10px 25px rgba(0,0,0,0.5); transition: opacity 0.3s ease; pointer-events: none;';
+                document.body.appendChild(toast);
+            }
+            toast.style.background = isError ? 'linear-gradient(135deg, #ef4444, #dc2626)' : 'linear-gradient(135deg, #6366f1, #8b5cf6)';
+            toast.textContent = msg;
+            toast.style.opacity = '1';
+            setTimeout(() => { toast.style.opacity = '0'; }, 3500);
+        }
+
+        // Custom Confirmation Modal System
+        let confirmPendingCallback = null;
+        window.showConfirmModal = function(title, message, onConfirm) {
+            document.getElementById('confirm-modal-title').textContent = title || 'Confirm Action';
+            document.getElementById('confirm-modal-message').textContent = message || 'Are you sure?';
+            confirmPendingCallback = onConfirm;
+            document.getElementById('confirm-modal-overlay').classList.add('active');
+        };
+        window.closeConfirmModal = function() {
+            document.getElementById('confirm-modal-overlay').classList.remove('active');
+            confirmPendingCallback = null;
+        };
+        document.getElementById('confirm-modal-ok-btn').onclick = function() {
+            const cb = confirmPendingCallback;
+            closeConfirmModal();
+            if (cb) cb();
+        };
+
+        // Custom Add Note Modal System
+        let currentAddNoteRelPath = '';
+        window.promptAddNoteByEl = function(btnEl) {
+            const relPath = decodeURIComponent(btnEl.dataset.relpath || '');
+            window.promptAddNote(relPath);
+        };
+        window.promptAddNote = function(relPath) {
+            currentAddNoteRelPath = relPath;
+            document.getElementById('note-text-input').value = '';
+            document.getElementById('note-modal-overlay').classList.add('active');
+            setTimeout(() => document.getElementById('note-text-input').focus(), 100);
+        };
+        window.closeNoteModal = function() {
+            document.getElementById('note-modal-overlay').classList.remove('active');
+            currentAddNoteRelPath = '';
+        };
+        document.getElementById('save-note-btn').onclick = async function() {
+            const noteText = document.getElementById('note-text-input').value;
+            if (!noteText || !noteText.trim()) {
+                showToast('Please type a note before saving', true);
+                return;
+            }
+            const relPath = currentAddNoteRelPath;
+            closeNoteModal();
+            try {
+                const res = await fetch(getApiUrl('/api/add_note'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ note_path: relPath, text: noteText.trim() })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('📝 Note appended successfully!');
+                } else {
+                    showToast('Error adding note: ' + (data.error || 'Failed'), true);
+                }
+            } catch(e) {
+                showToast('Add note failed: ' + e.message, true);
+            }
+        };
+
         // Trigger NotebookLM Generation in Background
         window.triggerGenerateArtifact = async function(relPath, artifactType) {
             try {
@@ -1804,9 +1920,9 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                     body: JSON.stringify({ note_path: relPath, artifact_type: artifactType })
                 });
                 const data = await res.json();
-                alert(data.message || `Started ${artifactType} generation in background!`);
+                showToast(data.message || `Started ${artifactType} generation in background!`);
             } catch(e) {
-                alert('Artifact generation failed: ' + e.message);
+                showToast('Artifact generation failed: ' + e.message, true);
             }
         };
 
@@ -1825,41 +1941,15 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 });
                 const data = await res.json();
                 if (data.success) {
-                    alert(data.message);
+                    showToast(data.message);
                     const freshRes = await fetch(getApiUrl('/api/podcasts'));
                     allPodcasts = await freshRes.json();
                     renderPodcasts();
                 } else {
-                    alert('Error moving note: ' + (data.error || 'Failed'));
+                    showToast('Error moving note: ' + (data.error || 'Failed'), true);
                 }
             } catch(e) {
-                alert('Move failed: ' + e.message);
-            }
-        };
-
-        window.promptAddNoteByEl = function(btnEl) {
-            const relPath = decodeURIComponent(btnEl.dataset.relpath || '');
-            window.promptAddNote(relPath);
-        };
-
-        // Add Note Text API Handler
-        window.promptAddNote = async function(relPath) {
-            const noteText = prompt("Enter note to append to markdown file:");
-            if (!noteText || !noteText.trim()) return;
-            try {
-                const res = await fetch(getApiUrl('/api/add_note'), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ note_path: relPath, text: noteText.trim() })
-                });
-                const data = await res.json();
-                if (data.success) {
-                    alert('Note appended successfully to note file!');
-                } else {
-                    alert('Error adding note: ' + (data.error || 'Failed'));
-                }
-            } catch(e) {
-                alert('Add note failed: ' + e.message);
+                showToast('Move failed: ' + e.message, true);
             }
         };
 
@@ -1912,9 +2002,11 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 }
             } else {
                 const targetPath = relPath || (podcast ? podcast.rel_path : '');
-                if (confirm("No podcast audio generated yet for this note. Would you like to generate a podcast with NotebookLM now?")) {
-                    window.triggerGenerateArtifact(targetPath, 'audio');
-                }
+                showConfirmModal(
+                    "🎙️ Generate Audio",
+                    "No podcast audio generated yet for this note. Would you like to generate a podcast with NotebookLM now?",
+                    () => window.triggerGenerateArtifact(targetPath, 'audio')
+                );
             }
             renderPodcasts();
         };
