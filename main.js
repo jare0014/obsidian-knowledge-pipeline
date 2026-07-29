@@ -10,7 +10,7 @@ const DEFAULT_SETTINGS = {
     pdfSourceFolder: 'G:/My Drive/Research Papers and Textbooks',
     pdfOutputFolder: '03_Knowledge',
     mistralApiKeyId: 'knowledge-pipeline-mistral-api-key',
-    notebooklmBrowser: 'manual',
+    notebooklmBrowser: 'chrome',
     podcastServerPort: 8085
 };
 
@@ -1248,18 +1248,18 @@ actions:
             const cmd = 'cmd.exe';
             const vaultPath = this.app.vault.adapter.getBasePath();
             const pluginDir = path.join(vaultPath, '.obsidian', 'plugins', 'knowledge-pipeline');
-            const notebooklmBrowserSetting = this.settings.notebooklmBrowser || 'manual';
-            let browserArg = '';
-            if (notebooklmBrowserSetting !== 'manual') {
+            const notebooklmBrowserSetting = this.settings.notebooklmBrowser || 'chrome';
+            let browserArg = ' --browser chrome';
+            if (notebooklmBrowserSetting && notebooklmBrowserSetting !== 'manual') {
                 browserArg = ` --browser ${notebooklmBrowserSetting}`;
             }
             const args = [
                 '/c',
                 'start',
-                'NotebookLM Login', // Explicit title avoids start's quote parsing bugs
+                'NotebookLM Login Wizard', // Explicit title avoids start's quote parsing bugs
                 '/wait',
                 'cmd',
-                '/k',
+                '/c',
                 `.\\.venv\\Scripts\\notebooklm.exe login${browserArg}`
             ];
 
@@ -2239,15 +2239,14 @@ class KnowledgePipelineSettingTab extends obsidian.PluginSettingTab {
             })();
 
             new obsidian.Setting(containerEl)
-                .setName('NotebookLM Cookie Source')
-                .setDesc('Select whether to use manual Playwright login or extract cookies directly from your local browser.')
+                .setName('NotebookLM Browser for Login')
+                .setDesc('Select which browser to launch for NotebookLM authentication (Google Chrome recommended for 1-click Google login).')
                 .addDropdown(dropdown => dropdown
-                    .addOption('manual', 'Manual (Playwright Login Window)')
-                    .addOption('chrome', 'Google Chrome')
+                    .addOption('chrome', 'Google Chrome (Recommended - 1-Click Login)')
                     .addOption('edge', 'Microsoft Edge')
                     .addOption('brave', 'Brave Browser')
-                    .addOption('firefox', 'Firefox')
-                    .setValue(this.plugin.settings.notebooklmBrowser || 'manual')
+                    .addOption('chromium', 'Bundled Playwright Chromium')
+                    .setValue(this.plugin.settings.notebooklmBrowser || 'chrome')
                     .onChange(async (value) => {
                         this.plugin.settings.notebooklmBrowser = value;
                         await this.plugin.saveSettings();
