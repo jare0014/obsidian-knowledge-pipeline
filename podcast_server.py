@@ -124,15 +124,18 @@ def scan_notes_metadata(vault_path):
             rel_path = os.path.relpath(note_path, vault_path).replace("\\", "/")
             
             # Determine folder category
-            category = "knowledge"
-            if rel_path.startswith("00_Imports/") or rel_path.startswith("01_Inbox/"):
+            if rel_path.startswith("00_Imports/"):
                 category = "imports"
+            elif rel_path.startswith("01_Inbox/"):
+                category = "inbox"
             elif rel_path.startswith("01_Incubator/"):
                 category = "incubator"
             elif rel_path.startswith("03_Knowledge/"):
                 category = "knowledge"
             elif rel_path.startswith("99_Archive/"):
                 category = "archive"
+            else:
+                category = "other"
             
             # Read content to parse metadata
             try:
@@ -280,6 +283,9 @@ def get_podcast_list():
     # Include non-audio notes from stage folders so Imports/Inbox/Incubator/Knowledge tabs show all items
     for norm_title, info in basename_map.items():
         if info['title'] not in matched_note_titles:
+            # Skip non-audio notes outside of pipeline stage folders
+            if info['category'] == 'other':
+                continue
             try:
                 mtime = os.path.getmtime(info['path']) if os.path.exists(info['path']) else 0
             except Exception:
