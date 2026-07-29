@@ -126,9 +126,7 @@ def scan_notes_metadata(vault_path):
             rel_path = os.path.relpath(note_path, vault_path).replace("\\", "/")
             
             # Determine folder category
-            if rel_path.startswith("00_Imports/"):
-                category = "imports"
-            elif rel_path.startswith("01_Inbox/"):
+            if rel_path.startswith("01_Inbox/"):
                 category = "inbox"
             elif rel_path.startswith("01_Incubator/"):
                 category = "incubator"
@@ -1534,7 +1532,6 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
 
             <div class="tabs-container" id="filter-tabs">
                 <button class="tab-btn active" data-filter="all">All Episodes</button>
-                <button class="tab-btn" data-filter="imports">📥 Imports</button>
                 <button class="tab-btn" data-filter="inbox">📥 Inbox</button>
                 <button class="tab-btn" data-filter="incubator">❔ Incubator</button>
                 <button class="tab-btn" data-filter="knowledge">🎓 Knowledge</button>
