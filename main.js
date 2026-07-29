@@ -98,6 +98,23 @@ class KnowledgePipelinePlugin extends obsidian.Plugin {
         // Add settings tab
         this.addSettingTab(new KnowledgePipelineSettingTab(this.app, this));
 
+        // Register podcast-player-hub code block processor
+        this.registerMarkdownCodeBlockProcessor('podcast-player-hub', (source, el, ctx) => {
+            el.empty();
+            const container = el.createDiv({ cls: 'podcast-player-hub-container' });
+            container.style.width = '100%';
+            container.style.height = '750px';
+            container.style.border = 'none';
+            
+            const port = this.settings.podcastServerPort || 8085;
+            const iframe = container.createEl('iframe');
+            iframe.src = `http://localhost:${port}/`;
+            iframe.style.width = '100%';
+            iframe.style.height = '100%';
+            iframe.style.border = 'none';
+            iframe.style.borderRadius = '8px';
+        });
+
         // Add command to process imports
         this.addCommand({
             id: 'process-imports',
