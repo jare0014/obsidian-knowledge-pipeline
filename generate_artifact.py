@@ -735,6 +735,20 @@ def main():
             notify_error(f"Unknown artifact type: {artifact_type}")
 
     except Exception as e:
+        if 'artifact_type' in locals() and artifact_type == "quiz" and 'clean_title' in locals():
+            try:
+                quizzes_dir = os.path.join(ATTACHMENTS_DIR, "Quizzes")
+                os.makedirs(quizzes_dir, exist_ok=True)
+                err_file = os.path.join(quizzes_dir, f"{clean_title} Quiz_error.json")
+                with open(err_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "exists": False,
+                        "error": str(e),
+                        "questions": [],
+                        "title": clean_title
+                    }, f)
+            except Exception:
+                pass
         notify_error(str(e))
         sys.exit(1)
 

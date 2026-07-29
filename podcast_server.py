@@ -63,25 +63,66 @@ def fetch_notebooklm_quiz(notebook_id, note_path=""):
     Fetch quiz questions for a notebook using notebooklm-py if available,
     check 99_System/Attachments/Quizzes for saved JSON artifacts, or generate structured quiz questions.
     """
-    # 1. Check for saved Quiz JSON file in 99_System/Attachments/Quizzes
+    quizzes_dir = os.path.join(VAULT_DIR, "99_System", "Attachments", "Quizzes")
     if note_path:
         note_basename = os.path.splitext(os.path.basename(note_path))[0]
+        clean_base = re.sub(r'Podcast(\s*\(\d+\))?$', '', note_basename, flags=re.IGNORECASE).strip()
+
+        # Check for error json file
+        for err_candidate in [f"{note_basename} Quiz_error.json", f"{clean_title(clean_base)} Quiz_error.json"]:
+            err_path = os.path.join(quizzes_dir, err_candidate)
+            if os.path.exists(err_path):
+                try:
+                    with open(err_path, "r", encoding="utf-8") as f:
+                        err_data = json.load(f)
+                        err_data["exists"] = False
+                        return err_data
+                except Exception:
+                    pass
+
         candidates = [
             f"{note_basename} Quiz.json",
-            f"{clean_title(note_basename)} Quiz.json"
+            f"{clean_title(note_basename)} Quiz.json",
+            f"{clean_base} Quiz.json",
+            f"{clean_title(clean_base)} Quiz.json"
         ]
         for quiz_json_filename in candidates:
-            quiz_json_path = os.path.join(VAULT_DIR, "99_System", "Attachments", "Quizzes", quiz_json_filename)
+            quiz_json_path = os.path.join(quizzes_dir, quiz_json_filename)
             if os.path.exists(quiz_json_path):
                 try:
                     with open(quiz_json_path, "r", encoding="utf-8") as f:
                         quiz_data = json.load(f)
-                        if quiz_data and "questions" in quiz_data:
+                        if quiz_data and "questions" in quiz_data and len(quiz_data["questions"]) > 0:
+                            quiz_data["exists"] = True
                             return quiz_data
                 except Exception:
                     pass
 
-    # 2. Return ungenerated status if quiz artifact does not exist
+        # Search directory for matching title/notebook_id
+        if os.path.exists(quizzes_dir):
+            norm_target = normalize_name(clean_base)
+            for q_file in os.listdir(quizzes_dir):
+                if q_file.endswith(".json") and not q_file.endswith("_error.json"):
+                    q_base = os.path.splitext(q_file)[0].replace(" Quiz", "")
+                    if normalize_name(q_base) == norm_target or norm_target in normalize_name(q_base):
+                        try:
+                            with open(os.path.join(quizzes_dir, q_file), "r", encoding="utf-8") as f:
+                                quiz_data = json.load(f)
+                                if quiz_data and "questions" in quiz_data and len(quiz_data["questions"]) > 0:
+                                    quiz_data["exists"] = True
+                                    return quiz_data
+                        except Exception:
+                            pass
+
+    auth_file = os.path.expanduser(r"~\.notebooklm\profiles\default\storage_state.json")
+    if not os.path.exists(auth_file) or os.path.getsize(auth_file) < 50:
+        return {
+            "exists": False,
+            "error": "NotebookLM is not authenticated. Please run 'notebooklm login' in your system terminal (PowerShell / Command Prompt) to log in to Google NotebookLM.",
+            "title": os.path.splitext(os.path.basename(note_path))[0] if note_path else "Knowledge Base Note",
+            "questions": []
+        }
+
     note_title = os.path.splitext(os.path.basename(note_path))[0] if note_path else "Knowledge Base Note"
     return {
         "exists": False,
@@ -89,7 +130,7 @@ def fetch_notebooklm_quiz(notebook_id, note_path=""):
         "notebook_id": notebook_id,
         "note_path": note_path,
         "questions": [],
-        "message": f"Quiz not yet generated for '{note_title}'. Promote to Knowledge or generate quiz to link it to this note."
+        "message": f"Quiz not yet generated for '{note_title}'."
     }
 
 def normalize_name(name):
@@ -2200,6 +2241,8 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
         let currentQuestionIdx = 0;
         let userAnswers = {};
 
+        let quizPollTimer = null;
+
         window.openQuizModalByEl = function(btnEl) {
             const filename = decodeURIComponent(btnEl.dataset.filename || '');
             const notebookId = decodeURIComponent(btnEl.dataset.notebookid || '');
@@ -2213,38 +2256,118 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             const optList = document.getElementById('quiz-options-list');
             
             overlay.classList.add('active');
-            qText.textContent = "Loading NotebookLM Quiz...";
+            qText.innerHTML = `
+                <div style="text-align: center; padding: 20px 10px;">
+                    <div style="margin: 0 auto 16px auto; width: 36px; height: 36px; border: 3px solid rgba(255,255,255,0.1); border-top-color: #8b5cf6; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                    <p style="margin:0; font-weight:500; font-size:1.05rem;">Fetching NotebookLM Quiz...</p>
+                </div>
+            `;
             optList.innerHTML = '';
             
+            loadQuizData(notebookId, notePath);
+        };
+
+        async function loadQuizData(notebookId, notePath) {
+            if (quizPollTimer) clearInterval(quizPollTimer);
             const targetUrl = getApiUrl(`/api/quiz?notebook_id=${encodeURIComponent(notebookId || '')}&note_path=${encodeURIComponent(notePath || '')}`);
             
-            fetch(targetUrl)
-                .then(res => {
-                    if (!res.ok) throw new Error("HTTP error " + res.status);
-                    return res.json();
-                })
-                .then(data => {
+            try {
+                const res = await fetch(targetUrl);
+                if (!res.ok) throw new Error("HTTP error " + res.status);
+                const data = await res.json();
+                
+                if (data && data.questions && data.questions.length > 0) {
+                    currentQuizQuestions = data.questions;
+                    currentQuestionIdx = 0;
+                    userAnswers = {};
+                    renderQuizQuestion();
+                } else if (data && data.error) {
+                    renderQuizError(data.error);
+                } else {
+                    showConfirmModal(
+                        "🧩 Generate Quiz",
+                        "Quiz not yet generated for this note. Would you like to generate a Quiz with NotebookLM now?",
+                        () => startQuizGenerationAndPoll(notebookId, notePath)
+                    );
+                }
+            } catch(err) {
+                console.error("Failed to load quiz:", err);
+                renderQuizError("Unable to fetch quiz questions. Please check server connection.");
+            }
+        }
+
+        function renderQuizError(errMsg) {
+            const qText = document.getElementById('quiz-question-text');
+            const optList = document.getElementById('quiz-options-list');
+            document.getElementById('quiz-counter').textContent = 'Error';
+            
+            let icon = '⚠️';
+            let title = 'Quiz Unavailable';
+            if (errMsg.toLowerCase().includes('authenticated') || errMsg.toLowerCase().includes('login')) {
+                icon = '🔒';
+                title = 'NotebookLM Authentication Required';
+            }
+
+            qText.innerHTML = `
+                <div style="text-align: center; padding: 20px 10px;">
+                    <div style="font-size: 2.5rem; margin-bottom: 12px;">${icon}</div>
+                    <h3 style="color: #ef4444; margin: 0 0 10px 0; font-size: 1.15rem;">${title}</h3>
+                    <p style="color: var(--text-secondary); line-height: 1.5; font-size: 0.95rem; margin: 0;">${errMsg}</p>
+                </div>
+            `;
+            optList.innerHTML = '';
+        }
+
+        function startQuizGenerationAndPoll(notebookId, notePath) {
+            const overlay = document.getElementById('quiz-modal-overlay');
+            const qText = document.getElementById('quiz-question-text');
+            const optList = document.getElementById('quiz-options-list');
+            
+            overlay.classList.add('active');
+            qText.innerHTML = `
+                <div style="text-align: center; padding: 24px 10px;">
+                    <div style="margin: 0 auto 16px auto; width: 40px; height: 40px; border: 4px solid rgba(255,255,255,0.1); border-top-color: #8b5cf6; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                    <h4 style="margin: 0 0 8px 0; color: #fff; font-size: 1.1rem;">⏳ Generating NotebookLM Quiz in Background...</h4>
+                    <p style="color: var(--text-secondary); font-size: 0.9rem; margin: 0;">This takes ~30–45 seconds. Auto-loading quiz as soon as it's ready.</p>
+                </div>
+            `;
+            optList.innerHTML = '';
+            
+            window.triggerGenerateArtifact(notePath, 'quiz');
+            
+            let pollAttempts = 0;
+            quizPollTimer = setInterval(async () => {
+                pollAttempts++;
+                const targetUrl = getApiUrl(`/api/quiz?notebook_id=${encodeURIComponent(notebookId || '')}&note_path=${encodeURIComponent(notePath || '')}`);
+                try {
+                    const res = await fetch(targetUrl);
+                    const data = await res.json();
                     if (data && data.questions && data.questions.length > 0) {
+                        clearInterval(quizPollTimer);
+                        quizPollTimer = null;
                         currentQuizQuestions = data.questions;
                         currentQuestionIdx = 0;
                         userAnswers = {};
+                        showToast('✨ Quiz generation complete!');
                         renderQuizQuestion();
-                    } else {
-                        overlay.classList.remove('active');
-                        showConfirmModal(
-                            "🧩 Generate Quiz",
-                            "Quiz not yet generated for this note. Would you like to generate a Quiz with NotebookLM now?",
-                            () => window.triggerGenerateArtifact(notePath, 'quiz')
-                        );
+                    } else if (data && data.error) {
+                        clearInterval(quizPollTimer);
+                        quizPollTimer = null;
+                        renderQuizError(data.error);
+                    } else if (pollAttempts > 25) {
+                        clearInterval(quizPollTimer);
+                        quizPollTimer = null;
+                        renderQuizError("Quiz generation timed out. Please try again.");
                     }
-                })
-                .catch(err => {
-                    console.error("Failed to load quiz:", err);
-                    qText.textContent = "Unable to fetch quiz questions. Please check connection.";
-                });
-        };
+                } catch(e) {}
+            }, 4000);
+        }
 
         window.closeQuizModal = function() {
+            if (quizPollTimer) {
+                clearInterval(quizPollTimer);
+                quizPollTimer = null;
+            }
             document.getElementById('quiz-modal-overlay').classList.remove('active');
         };
 
