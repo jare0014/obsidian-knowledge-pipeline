@@ -280,11 +280,16 @@ def get_podcast_list():
                 'mtime': mtime
             })
 
-    # Include non-audio notes from stage folders so Imports/Inbox/Incubator/Knowledge tabs show all items
+    # Include non-audio notes from stage folders if they have a URL or notebook_id (for NotebookLM generation)
     for norm_title, info in basename_map.items():
         if info['title'] not in matched_note_titles:
             # Skip non-audio notes outside of pipeline stage folders
             if info['category'] == 'other':
+                continue
+            # Skip plain text notes that lack both a URL and NotebookLM notebook_id
+            has_url = bool(info.get('url') and str(info['url']).strip())
+            has_notebook = bool(info.get('notebook_id') and str(info['notebook_id']).strip())
+            if not has_url and not has_notebook:
                 continue
             try:
                 mtime = os.path.getmtime(info['path']) if os.path.exists(info['path']) else 0
@@ -1715,6 +1720,15 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 const encFilename = encodeURIComponent(p.filename || '');
                 const encNotebookId = encodeURIComponent(p.notebook_id || '');
 
+                const hasAudio = Boolean(p.filename && p.filename.trim());
+                const playBtnHtml = hasAudio ? `
+                    <button class="play-card-btn" data-filename="${encFilename}" data-relpath="${encRelPath}" onclick="togglePlayPodcastByEl(this)" title="Play Episode">
+                        ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
+                    </button>
+                ` : `
+                    <button class="action-btn promote-btn" data-filename="${encFilename}" data-relpath="${encRelPath}" onclick="togglePlayPodcastByEl(this)" title="Generate Podcast Audio with NotebookLM">🎙️ Generate Audio</button>
+                `;
+
                 return `
                     <div class="podcast-card ${isPlayingThis ? 'playing' : ''}" data-file="${encFilename}">
                         <div class="card-header">
@@ -1735,16 +1749,12 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                                 ${p.category === 'imports' ? `
                                     <button class="action-btn promote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'inbox')" title="Promote to Inbox">➡️ Promote to Inbox</button>
                                 ` : p.category === 'inbox' ? `
-                                    <button class="play-card-btn" data-filename="${encFilename}" data-relpath="${encRelPath}" onclick="togglePlayPodcastByEl(this)" title="Play Episode">
-                                        ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
-                                    </button>
+                                    ${playBtnHtml}
                                     <button class="action-btn note-btn" data-relpath="${encRelPath}" onclick="promptAddNoteByEl(this)" title="Add Note to File">📝 Add Note</button>
                                     <button class="action-btn promote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'knowledge')" title="Promote to Knowledge">🎓 Promote to Knowledge</button>
                                     <button class="action-btn demote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'incubator')" title="Demote to Incubator">❔ Demote to Incubator</button>
                                 ` : p.category === 'knowledge' ? `
-                                    <button class="play-card-btn" data-filename="${encFilename}" data-relpath="${encRelPath}" onclick="togglePlayPodcastByEl(this)" title="Play Episode">
-                                        ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
-                                    </button>
+                                    ${playBtnHtml}
                                     <button class="action-btn note-btn" data-relpath="${encRelPath}" onclick="promptAddNoteByEl(this)" title="Add Note to File">📝 Add Note</button>
                                     <button class="quiz-card-btn" data-filename="${encFilename}" data-notebookid="${encNotebookId}" data-relpath="${encRelPath}" onclick="openQuizModalByEl(this)" title="NotebookLM Quiz">🧩 Quiz</button>
                                     <button class="action-btn demote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'inbox')" title="Demote to Inbox">📥 Demote to Inbox</button>
@@ -1752,9 +1762,7 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                                     <button class="action-btn promote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'inbox')" title="Move to Inbox">📥 Move to Inbox</button>
                                     <button class="action-btn promote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'knowledge')" title="Promote to Knowledge">🎓 Promote to Knowledge</button>
                                 ` : `
-                                    <button class="play-card-btn" data-filename="${encFilename}" data-relpath="${encRelPath}" onclick="togglePlayPodcastByEl(this)" title="Play Episode">
-                                        ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
-                                    </button>
+                                    ${playBtnHtml}
                                 `}
                             </div>
                         </div>
