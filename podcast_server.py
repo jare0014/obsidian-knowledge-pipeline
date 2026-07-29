@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import json
+import shutil
+import subprocess
 import urllib.parse
 import http.server
 import socketserver
@@ -473,6 +475,23 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 subprocess.Popen([python_bin, script_path, dest_full, 'quiz'], shell=False)
 
             self._send_json({'success': True, 'new_path': new_rel_path, 'message': f'Moved note to {dest_folder_name}'})
+            return
+
+        if path == '/api/generate_artifact':
+            note_rel_path = body.get('note_path', '')
+            artifact_type = body.get('artifact_type', 'audio')
+            if not note_rel_path:
+                self._send_json({'error': 'Missing note_path'}, status=400)
+                return
+            src_full = os.path.join(VAULT_DIR, note_rel_path) if not os.path.isabs(note_rel_path) else note_rel_path
+            if not os.path.exists(src_full):
+                self._send_json({'error': 'Note file not found'}, status=404)
+                return
+            
+            python_bin = sys.executable
+            script_path = os.path.join(os.path.dirname(__file__), 'generate_artifact.py')
+            subprocess.Popen([python_bin, script_path, src_full, artifact_type], shell=False)
+            self._send_json({'success': True, 'message': f'Triggered {artifact_type} generation in background for {os.path.basename(src_full)}'})
             return
             
         self._send_json({'error': 'Not found'}, status=404)
@@ -1690,15 +1709,19 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 const fileDate = new Date(p.mtime * 1000).toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'});
                 const sizeMb = (p.size / (1024 * 1024)).toFixed(1);
                 
+                const encRelPath = encodeURIComponent(p.rel_path || '');
+                const encFilename = encodeURIComponent(p.filename || '');
+                const encNotebookId = encodeURIComponent(p.notebook_id || '');
+
                 return `
-                    <div class="podcast-card ${isPlayingThis ? 'playing' : ''}" data-file="${p.filename}">
+                    <div class="podcast-card ${isPlayingThis ? 'playing' : ''}" data-file="${encFilename}">
                         <div class="card-header">
                             <span class="topic-badge" title="${p.topic}">${p.topic}</span>
                             <span class="category-tag">${p.category}</span>
                         </div>
                         <h2 class="card-title" title="${p.title}">${p.title}</h2>
                         <p class="card-summary" id="summary-${p.filename.replace(/[^a-zA-Z0-9]/g, '')}">${p.summary}</p>
-                        <button class="read-more-btn" onclick="toggleSummary('${p.filename}')" id="rm-btn-${p.filename.replace(/[^a-zA-Z0-9]/g, '')}">
+                        <button class="read-more-btn" data-filename="${encFilename}" onclick="toggleSummaryByEl(this)" id="rm-btn-${p.filename.replace(/[^a-zA-Z0-9]/g, '')}">
                             Read More
                         </button>
                         <div class="card-footer">
@@ -1708,26 +1731,26 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                             </div>
                             <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                                 ${p.category === 'imports' ? `
-                                    <button class="action-btn promote-btn" onclick="moveNote('${p.rel_path}', 'inbox')" title="Promote to Inbox">➡️ Promote to Inbox</button>
+                                    <button class="action-btn promote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'inbox')" title="Promote to Inbox">➡️ Promote to Inbox</button>
                                 ` : p.category === 'inbox' ? `
-                                    <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
+                                    <button class="play-card-btn" data-filename="${encFilename}" data-relpath="${encRelPath}" onclick="togglePlayPodcastByEl(this)" title="Play Episode">
                                         ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
                                     </button>
-                                    <button class="action-btn note-btn" onclick="promptAddNote('${p.rel_path}')" title="Add Note to File">📝 Add Note</button>
-                                    <button class="action-btn promote-btn" onclick="moveNote('${p.rel_path}', 'knowledge')" title="Promote to Knowledge">🎓 Promote to Knowledge</button>
-                                    <button class="action-btn demote-btn" onclick="moveNote('${p.rel_path}', 'incubator')" title="Demote to Incubator">❔ Demote to Incubator</button>
+                                    <button class="action-btn note-btn" data-relpath="${encRelPath}" onclick="promptAddNoteByEl(this)" title="Add Note to File">📝 Add Note</button>
+                                    <button class="action-btn promote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'knowledge')" title="Promote to Knowledge">🎓 Promote to Knowledge</button>
+                                    <button class="action-btn demote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'incubator')" title="Demote to Incubator">❔ Demote to Incubator</button>
                                 ` : p.category === 'knowledge' ? `
-                                    <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
+                                    <button class="play-card-btn" data-filename="${encFilename}" data-relpath="${encRelPath}" onclick="togglePlayPodcastByEl(this)" title="Play Episode">
                                         ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
                                     </button>
-                                    <button class="action-btn note-btn" onclick="promptAddNote('${p.rel_path}')" title="Add Note to File">📝 Add Note</button>
-                                    <button class="quiz-card-btn" onclick="openQuizModal('${p.filename}', '${p.notebook_id || ''}', '${p.rel_path}')" title="NotebookLM Quiz">🧩 Quiz</button>
-                                    <button class="action-btn demote-btn" onclick="moveNote('${p.rel_path}', 'inbox')" title="Demote to Inbox">📥 Demote to Inbox</button>
+                                    <button class="action-btn note-btn" data-relpath="${encRelPath}" onclick="promptAddNoteByEl(this)" title="Add Note to File">📝 Add Note</button>
+                                    <button class="quiz-card-btn" data-filename="${encFilename}" data-notebookid="${encNotebookId}" data-relpath="${encRelPath}" onclick="openQuizModalByEl(this)" title="NotebookLM Quiz">🧩 Quiz</button>
+                                    <button class="action-btn demote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'inbox')" title="Demote to Inbox">📥 Demote to Inbox</button>
                                 ` : p.category === 'incubator' ? `
-                                    <button class="action-btn promote-btn" onclick="moveNote('${p.rel_path}', 'inbox')" title="Move to Inbox">📥 Move to Inbox</button>
-                                    <button class="action-btn promote-btn" onclick="moveNote('${p.rel_path}', 'knowledge')" title="Promote to Knowledge">🎓 Promote to Knowledge</button>
+                                    <button class="action-btn promote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'inbox')" title="Move to Inbox">📥 Move to Inbox</button>
+                                    <button class="action-btn promote-btn" data-relpath="${encRelPath}" onclick="moveNoteByEl(this, 'knowledge')" title="Promote to Knowledge">🎓 Promote to Knowledge</button>
                                 ` : `
-                                    <button class="play-card-btn" onclick="togglePlayPodcast('${p.filename}')" title="Play Episode">
+                                    <button class="play-card-btn" data-filename="${encFilename}" data-relpath="${encRelPath}" onclick="togglePlayPodcastByEl(this)" title="Play Episode">
                                         ${playBtnState === 'play' ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>'}
                                     </button>
                                 `}
@@ -1739,6 +1762,11 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
         }
 
         // Toggle Expandable Summaries
+        window.toggleSummaryByEl = function(btnEl) {
+            const filename = decodeURIComponent(btnEl.dataset.filename || '');
+            window.toggleSummary(filename);
+        };
+
         window.toggleSummary = function(filename) {
             const cleanId = filename.replace(/[^a-zA-Z0-9]/g, '');
             const el = document.getElementById(`summary-${cleanId}`);
@@ -1752,10 +1780,35 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             }
         };
 
+        function getApiUrl(path) {
+            const origin = window.location.origin && window.location.origin.startsWith('http') ? window.location.origin : 'http://localhost:8085';
+            return origin + path;
+        }
+
+        // Trigger NotebookLM Generation in Background
+        window.triggerGenerateArtifact = async function(relPath, artifactType) {
+            try {
+                const res = await fetch(getApiUrl('/api/generate_artifact'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ note_path: relPath, artifact_type: artifactType })
+                });
+                const data = await res.json();
+                alert(data.message || `Started ${artifactType} generation in background!`);
+            } catch(e) {
+                alert('Artifact generation failed: ' + e.message);
+            }
+        };
+
+        window.moveNoteByEl = function(btnEl, destStage) {
+            const relPath = decodeURIComponent(btnEl.dataset.relpath || '');
+            window.moveNote(relPath, destStage);
+        };
+
         // Move Note Stage API Handler
         window.moveNote = async function(relPath, destStage) {
             try {
-                const res = await fetch('/api/move_note', {
+                const res = await fetch(getApiUrl('/api/move_note'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ note_path: relPath, destination: destStage })
@@ -1763,7 +1816,7 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                 const data = await res.json();
                 if (data.success) {
                     alert(data.message);
-                    const freshRes = await fetch('/api/podcasts');
+                    const freshRes = await fetch(getApiUrl('/api/podcasts'));
                     allPodcasts = await freshRes.json();
                     renderPodcasts();
                 } else {
@@ -1774,12 +1827,17 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             }
         };
 
+        window.promptAddNoteByEl = function(btnEl) {
+            const relPath = decodeURIComponent(btnEl.dataset.relpath || '');
+            window.promptAddNote(relPath);
+        };
+
         // Add Note Text API Handler
         window.promptAddNote = async function(relPath) {
             const noteText = prompt("Enter note to append to markdown file:");
             if (!noteText || !noteText.trim()) return;
             try {
-                const res = await fetch('/api/add_note', {
+                const res = await fetch(getApiUrl('/api/add_note'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ note_path: relPath, text: noteText.trim() })
@@ -1809,33 +1867,44 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             renderPodcasts();
         });
 
-        // Toggle audio play/pause
-        window.togglePlayPodcast = function(filename) {
-            const podcast = allPodcasts.find(p => p.filename === filename);
-            if (!podcast) return;
+        window.togglePlayPodcastByEl = function(btnEl) {
+            const filename = decodeURIComponent(btnEl.dataset.filename || '');
+            const relPath = decodeURIComponent(btnEl.dataset.relpath || '');
+            window.togglePlayPodcast(filename, relPath);
+        };
 
-            if (currentPodcast && currentPodcast.filename === filename) {
-                if (audio.paused) {
-                    audio.play();
+        // Toggle audio play/pause
+        window.togglePlayPodcast = function(filename, relPath) {
+            const podcast = allPodcasts.find(p => (filename && p.filename === filename) || (relPath && p.rel_path === relPath));
+            if (podcast && podcast.filename) {
+                if (currentPodcast && currentPodcast.filename === podcast.filename) {
+                    if (audio.paused) {
+                        audio.play();
+                    } else {
+                        audio.pause();
+                    }
                 } else {
-                    audio.pause();
+                    currentPodcast = podcast;
+                    audio.src = `/audio/${encodeURIComponent(podcast.filename)}`;
+                    audio.play();
+                    
+                    playerTitle.textContent = podcast.title;
+                    playerTopic.textContent = podcast.topic;
+                    
+                    if (podcast.url) {
+                        playerSourceLink.href = podcast.url;
+                        playerSourceLink.style.display = 'inline-flex';
+                    } else {
+                        playerSourceLink.style.display = 'none';
+                    }
+                    
+                    playerBar.style.display = 'block';
                 }
             } else {
-                currentPodcast = podcast;
-                audio.src = `/audio/${encodeURIComponent(filename)}`;
-                audio.play();
-                
-                playerTitle.textContent = podcast.title;
-                playerTopic.textContent = podcast.topic;
-                
-                if (podcast.url) {
-                    playerSourceLink.href = podcast.url;
-                    playerSourceLink.style.display = 'inline-flex';
-                } else {
-                    playerSourceLink.style.display = 'none';
+                const targetPath = relPath || (podcast ? podcast.rel_path : '');
+                if (confirm("No podcast audio generated yet for this note.\n\nWould you like to generate a podcast with NotebookLM now?")) {
+                    window.triggerGenerateArtifact(targetPath, 'audio');
                 }
-                
-                playerBar.style.display = 'block';
             }
             renderPodcasts();
         };
@@ -2020,7 +2089,7 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
             qText.textContent = "Loading NotebookLM Quiz...";
             optList.innerHTML = '';
             
-            const targetUrl = `/api/quiz?notebook_id=${encodeURIComponent(notebookId || '')}&note_path=${encodeURIComponent(notePath || '')}`;
+            const targetUrl = getApiUrl(`/api/quiz?notebook_id=${encodeURIComponent(notebookId || '')}&note_path=${encodeURIComponent(notePath || '')}`);
             
             fetch(targetUrl)
                 .then(res => {
@@ -2034,7 +2103,10 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                         userAnswers = {};
                         renderQuizQuestion();
                     } else {
-                        qText.textContent = "No quiz questions available for this note.";
+                        overlay.classList.remove('active');
+                        if (confirm("Quiz not yet generated for this note.\n\nWould you like to generate a Quiz with NotebookLM now?")) {
+                            window.triggerGenerateArtifact(notePath, 'quiz');
+                        }
                     }
                 })
                 .catch(err => {

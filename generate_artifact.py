@@ -638,7 +638,26 @@ def main():
             except Exception as e:
                 notify(f"Warning: Could not remove temporary JSON: {e}")
                 
-            notify("Success! Mind Map generated and added as a Mermaid diagram.")
+        elif artifact_type == "quiz":
+            notify("Starting quiz generation. This takes ~30 seconds...")
+            run_cli_cmd(f'notebooklm generate quiz -n {notebook_id} --json')
+            notify("Quiz generation complete.")
+            
+            quizzes_dir = os.path.join(ATTACHMENTS_DIR, "Quizzes")
+            os.makedirs(quizzes_dir, exist_ok=True)
+            dest_filename = f"{clean_title} Quiz.json"
+            dest_path = os.path.join(quizzes_dir, dest_filename)
+            notify("Downloading Quiz JSON...")
+            import tempfile
+            temp_quiz_path = os.path.join(tempfile.gettempdir(), f"temp_{dest_filename}")
+            if os.path.exists(temp_quiz_path):
+                try:
+                    os.remove(temp_quiz_path)
+                except Exception:
+                    pass
+            run_cli_cmd(f'notebooklm download quiz -n {notebook_id} --latest "{temp_quiz_path}"')
+            shutil.move(temp_quiz_path, dest_path)
+            notify(f"Success! Quiz downloaded: {dest_filename}")
 
         elif artifact_type == "audio":
             notify("Starting audio overview generation (deep-dive format). This takes 1-3 minutes...")
