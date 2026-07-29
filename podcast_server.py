@@ -2200,6 +2200,13 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
         let currentQuestionIdx = 0;
         let userAnswers = {};
 
+        window.openQuizModalByEl = function(btnEl) {
+            const filename = decodeURIComponent(btnEl.dataset.filename || '');
+            const notebookId = decodeURIComponent(btnEl.dataset.notebookid || '');
+            const relPath = decodeURIComponent(btnEl.dataset.relpath || '');
+            window.openQuizModal(filename, notebookId, relPath);
+        };
+
         window.openQuizModal = function(filename, notebookId, notePath) {
             const overlay = document.getElementById('quiz-modal-overlay');
             const qText = document.getElementById('quiz-question-text');
@@ -2224,9 +2231,11 @@ class PodcastHTTPHandler(http.server.BaseHTTPRequestHandler):
                         renderQuizQuestion();
                     } else {
                         overlay.classList.remove('active');
-                        if (confirm("Quiz not yet generated for this note. Would you like to generate a Quiz with NotebookLM now?")) {
-                            window.triggerGenerateArtifact(notePath, 'quiz');
-                        }
+                        showConfirmModal(
+                            "🧩 Generate Quiz",
+                            "Quiz not yet generated for this note. Would you like to generate a Quiz with NotebookLM now?",
+                            () => window.triggerGenerateArtifact(notePath, 'quiz')
+                        );
                     }
                 })
                 .catch(err => {
